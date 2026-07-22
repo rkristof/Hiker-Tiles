@@ -1,0 +1,115 @@
+name: Embed OSMC Symbol Images
+description: >
+  Generates PNG images for all OSMC symbols listed in osmc-symbols.txt and
+  embeds them into the given MBTiles file as a `symbols` table.
+
+inputs:
+  filename:
+    description: Path to the MBTiles file to embed symbols into.
+    required: true
+  embed_kct_symbols:
+    description: Whether to generate and embed KCT symbols (Czech/Slovak hiking club system).
+    required: false
+    default: 'false'
+  embed_jel_symbols:
+    description: Whether to generate and embed Hungarian JEL symbols.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install symbol generation dependencies
+      shell: bash
+      run: |
+        sudo apt-get install -y python3-gi python3-gi-cairo libcairo2-dev \
+          gir1.2-pango-1.0 gir1.2-rsvg-2.0 librsvg2-bin
+        wheel_url=$(gh release view latest-wheel \
+          --repo rkristof/waymarkedtrails-shields \
+          --json assets \
+          --jq '.assets[] | select(.name | endswith(".whl")) | .url' | head -1)
+        pip3 install "$wheel_url"
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Generate and embed OSMC and KCT symbol images
+      shell: python3 {0}
+      env:
+        FILENAME: ${{ inputs.filename }}
+        EMBED_KCT: ${{ inputs.embed_kct_symbols }}
+        EMBED_JEL: ${{ inputs.embed_jel_symbols }}
+      run: |
+        import os, subprocess, sqlite3
+        from wmt_shields import ShieldFactory
+        from wmt_shields.wmt_config import WmtConfig
+
+        filename = os.environ['FILENAME']
+
+        with open('osmc-symbols.txt') as f:
+            osmc_symbols = [line.strip() for line in f if line.strip()]
+
+        styles = ['.osmc_symbol']
+
+        embed_kct = os.environ.get('EMBED_KCT', 'false').lower() == 'true'
+        if embed_kct:
+            styles.append('.kct_symbol')
+
+        embed_jel = os.environ.get('EMBED_JEL', 'false').lower() == 'true'
+        if embed_jel:
+            styles.append('.jel_symbol')
+
+        factory = ShieldFactory(tuple(styles), WmtConfig())
+        os.makedirs('osmc-svgs', exist_ok=True)
+
+        generated = {}
+
+        def render(tags, sym_name):
+            shield = factory.create(tags, '', border_color=(0, 0, 0))
+            if shield is None:
+                print(f'  no renderer for: {sym_name}')
+                return
+            svg_path = f'osmc-svgs/{shield.uuid()}.svg'
+            png_path = f'osmc-svgs/{shield.uuid()}.png'
+            shield.to_file(svg_path)
+            result = subprocess.run(
+                ['rsvg-convert', '-w', '40', '-h', '40', svg_path, '-o', png_path],
+                capture_output=True)
+            if result.returncode != 0:
+                print(f'  rsvg-convert failed for {sym_name}: {result.stderr.decode()}')
+                return
+            generated[sym_name] = png_path
+
+        # Render OSMC symbols collected from the tile data.
+        for sym in osmc_symbols:
+            render({'osmc:symbol': sym}, sym)
+
+        # Render all KCT combinations. The name stored in the symbols table uses the
+        # format kct_<color>:<type>, matching what the tile pipeline writes into the
+        # GeoJSON `symbol` field when symbol_tag=kct is used.
+        if embed_kct:
+            # KCT symbols are a fixed 4×8 set (Czech/Slovak hiking club system).
+            kct_colors = ('red', 'blue', 'green', 'yellow')
+            kct_types = ('major', 'local', 'interesting_object', 'learning', 'peak', 'ruin', 'spring', 'horse')
+            for color in kct_colors:
+                for kct_type in kct_types:
+                    render({f'kct_{color}': kct_type}, f'kct_{color}:{kct_type}')
+
+        # Render JEL symbols. The symbol values in osmc-symbols.txt are the raw
+        # jel tag values (e.g. 'k', 'p+', 'z') when symbol_tag=jel was used.
+        if embed_jel:
+            for sym in osmc_symbols:
+                render({'jel': sym}, sym)
+
+        kct_count = len(kct_colors) * len(kct_types) if embed_kct else 0
+        jel_count = len(osmc_symbols) if embed_jel else 0
+        print(f'Generated {len(generated)} symbol images: {len(osmc_symbols)} OSMC ({jel_count} JEL, {kct_count} KCT)')
+
+        con = sqlite3.connect(filename)
+        con.execute('CREATE TABLE IF NOT EXISTS symbols (name TEXT PRIMARY KEY, image BLOB)')
+        for sym, path in generated.items():
+            with open(path, 'rb') as f:
+                data = f.read()
+            con.execute('INSERT OR REPLACE INTO symbols (name, image) VALUES (?, ?)', (sym, data))
+        con.commit()
+        con.close()
+        print(f'Embedded {len(generated)} symbols into {filename}')

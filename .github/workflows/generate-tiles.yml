@@ -1,0 +1,443 @@
+name: Generate Country Tiles
+
+on:
+  workflow_call:
+    inputs:
+      country:
+        description: Country name matching the Geofabrik ID
+        required: true
+        type: string
+      symbol_tag:
+        description: |
+          OSM tag key used to read the route symbol ('osmc:symbol', 'jel' or 'kct').
+          Use 'jel' for Hungarian routes that use the jel tag.
+          Use 'kct' for Czech/Slovak routes that use kct_red/kct_blue/kct_green/kct_yellow keys.
+        required: false
+        type: string
+        default: 'osmc:symbol'
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download OSM extract
+        run: |
+          echo "Downloading ${{ inputs.country }} OSM extract from Geofabrik"
+          wget -q \
+            https://download.geofabrik.de/europe/${{ inputs.country }}-latest.osm.pbf \
+            -O tiles-latest.osm.pbf
+          echo "Downloaded: $(du -sh tiles-latest.osm.pbf | cut -f1)"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y tippecanoe osmium-tool
+          pip3 install osmium
+
+      - name: Generate base map tiles
+        uses: ./.github/actions/generate-base-tiles
+        with:
+          country: ${{ inputs.country }}
+
+      - name: Extract hiking routes with route attributes to GeoJSON
+        run: |
+          # Pre-filter the full PBF to only hiking route relations (+ their referenced
+          # ways and nodes) and natural point nodes. This shrinks the input from the full
+          # country extract to a fraction of that, making both Python passes fast.
+          osmium tags-filter tiles-latest.osm.pbf \
+            r/route=hiking r/route=foot r/route=mtb \
+            n/natural=peak n/natural=cave_entrance n/natural=volcano \
+            n/checkpoint=hiking \
+            -o tiles-filtered.osm.pbf
+          echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
+          python3 << 'PYEOF'
+          import osmium, json, os, math
+
+          class WayRouteCollector(osmium.SimpleHandler):
+              def __init__(self):
+                  super().__init__()
+                  self.way_routes = {}  # way_id -> list of attrs from each relation
+                  self.relations = {}   # relation_id -> {attrs, way_ids}
+              def relation(self, r):
+                  tags = {t.k: t.v for t in r.tags}
+                  if tags.get('type') != 'route': return
+                  rt = tags.get('route', '')
+                  if rt not in ('hiking', 'foot', 'mtb'): return
+                  symbol_tag = os.environ['SYMBOL_TAG']
+                  # kct_* (Czech) and operator=KST (Slovak) both use the same shield
+                  # renderer and produce kct_<color>:<type> symbol names.
+                  if symbol_tag == 'kct':
+                      if any(k.startswith('kct_') for k in tags):
+                          # Czech system: kct_red=major, kct_blue=local, …
+                          symbol = next(
+                              (f'kct_{k[4:]}:{v}'
+                               for k, v in tags.items()
+                               if k.startswith('kct_')),
+                              ''
+                          )
+                      elif tags.get('operator', '').lower() == 'kst':
+                          # Slovak system: operator=KST + colour=<color> + symbol=<type>
+                          col = tags.get('colour', '')
+                          sym = tags.get('symbol', '')
+                          symbol = f'kct_{col}:{sym}' if col and sym else ''
+                      else:
+                          symbol = ''
+                  else:
+                      symbol = tags.get(symbol_tag, '')
+                  attrs = {
+                      'type': rt,
+                      'name': tags.get('name', ''),
+                      'name_int': tags.get('name:en', '') or tags.get('int_name', ''),
+                      'colour': tags.get('colour', ''),
+                      'network': tags.get('network', ''),
+                      'symbol': symbol,
+                  }
+                  self.relations[r.id] = {**attrs, 'way_ids': [m.ref for m in r.members if m.type == 'w']}
+                  for m in r.members:
+                      if m.type == 'w':
+                          self.way_routes.setdefault(m.ref, []).append(attrs)
+
+          class GeoJSONExporter(osmium.SimpleHandler):
+              def __init__(self, way_routes, ways_file, points_file):
+                  super().__init__()
+                  self.way_routes = way_routes
+                  self.ways_file = ways_file
+                  self.points_file = points_file
+                  self.way_count = 0
+                  self.point_count = 0
+                  self.osmc_symbols = set()  # unique osmc:symbol values seen
+                  self.symbol_groups_buf = []  # buffered (coords, base, symbol_vals)
+                  self.way_groups_buf = []  # buffered (coords, base), merged into chains after the pass
+                  self.way_coords = {}  # way_id -> coords, for route-line stitching
+              def node(self, n):
+                  tags = {t.k: t.v for t in n.tags}
+                  props = {}
+                  natural = tags.get('natural', '')
+                  if natural in ('peak', 'cave_entrance', 'volcano'):
+                      props = {'type': natural, 'name': tags.get('name', '')}
+                      if props['name'] != '' and tags.get('ele'):
+                          try:
+                              props['name'] = f'{props['name']}\n{tags['ele']} m'
+                          except ValueError:
+                              pass
+                  elif tags.get('checkpoint', '') == 'hiking' and tags.get('checkpoint:type', '') == 'stamp':
+                      props = {'type': 'stamp', 'name': tags.get('name', '')}
+                      if tags.get('ref'):
+                          try:
+                              props['name'] = f'{props['name']} ({tags['ref']})'
+                          except ValueError:
+                              pass
+                  else:
+                      return
+                  self.points_file.write(json.dumps({
+                      'type': 'Feature',
+                      'geometry': {'type': 'Point', 'coordinates': [n.location.lon, n.location.lat]},
+                      'properties': props,
+                  }) + '\n')
+                  self.point_count += 1
+              def way(self, w):
+                  attr_list = self.way_routes.get(w.id)
+                  if not attr_list: return
+                  try:
+                      coords = [[n.lon, n.lat] for n in w.nodes]
+                  except osmium.InvalidLocationError:
+                      return
+                  if len(coords) < 2: return
+                  self.way_coords[w.id] = coords
+                  primary = attr_list[0]
+                  symbol_vals = list(dict.fromkeys(a['symbol']         for a in attr_list if a['symbol']))
+                  base = {
+                      'type': primary['type'],
+                      'name': primary['name'],
+                      'colour': primary['colour'],
+                      'network': primary['network'],
+                  }
+                  self.way_groups_buf.append((coords, base))
+                  if symbol_vals:
+                      self.osmc_symbols.update(symbol_vals)
+                      self.symbol_groups_buf.append((coords, base, symbol_vals))
+                  self.way_count += 1
+
+          collector = WayRouteCollector()
+          collector.apply_file(f'tiles-filtered.osm.pbf')
+          print(f'Route member ways collected: {len(collector.way_routes)}')
+
+          def _chain_lines(lines):
+              """Chain a list of coordinate arrays into longer sequences by endpoint matching."""
+              if not lines:
+                  return []
+              n = len(lines)
+              used = [False] * n
+              adj = {}
+              for i, line in enumerate(lines):
+                  adj.setdefault(tuple(line[0]), []).append((i, 'start'))
+                  adj.setdefault(tuple(line[-1]), []).append((i, 'end'))
+              chains = []
+              for seed in range(n):
+                  if used[seed]:
+                      continue
+                  used[seed] = True
+                  chain = list(lines[seed])
+                  while True:
+                      nexts = [(i, e) for i, e in adj.get(tuple(chain[-1]), []) if not used[i]]
+                      if len(nexts) != 1:
+                          break
+                      i, end = nexts[0]
+                      used[i] = True
+                      chain.extend(lines[i][1:] if end == 'start' else list(reversed(lines[i][:-1])))
+                  while True:
+                      nexts = [(i, e) for i, e in adj.get(tuple(chain[0]), []) if not used[i]]
+                      if len(nexts) != 1:
+                          break
+                      i, end = nexts[0]
+                      used[i] = True
+                      chain[0:0] = (lines[i][:-1] if end == 'end' else list(reversed(lines[i][1:])))
+                  if len(chain) >= 2:
+                      chains.append(chain)
+              return chains
+
+          def haversine(p1, p2):
+              R = 6371000 # meters
+              lat1, lat2 = math.radians(p1[1]), math.radians(p2[1])
+              dlat = lat2 - lat1
+              dlon = math.radians(p2[0] - p1[0])
+              a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+              return R * 2 * math.asin(math.sqrt(a))
+
+          def route_distance_m(chains):
+              total = 0.0
+              for chain in chains:
+                  for a, b in zip(chain, chain[1:]):
+                      total += haversine(a, b)
+              return round(total)
+                
+          with open('hiking-ways.geojsonseq', 'w') as wf, \
+               open('natural-points.geojsonseq', 'w') as pf, \
+               open('hiking-symbols.geojsonseq', 'w') as sf:
+              exporter = GeoJSONExporter(collector.way_routes, wf, pf)
+              exporter.apply_file(f'tiles-filtered.osm.pbf', locations=True)
+              print(f'Route ways matched: {exporter.way_count}')
+              print(f'Natural points written: {exporter.point_count}')
+
+              # Merge adjacent way-segments sharing an endpoint and identical route attributes into
+              # longer chains, so tippecanoe's --drop-lines decision (which operates per input feature)
+              # drops or keeps whole unbroken same-route stretches instead of arbitrary OSM way
+              # boundaries. This keeps the existing one-relation-per-way dedup (no overlap duplication
+              # when routes share a path) while fixing the fragmented look at low zoom.
+              def _merge_way_groups(buf):
+                  by_key = {}
+                  for coords, base in buf:
+                      key = (base['type'], base['name'], base['colour'], base['network'])
+                      by_key.setdefault(key, []).append(coords)
+                  merged = []
+                  for (rt, name, colour, network), lines in by_key.items():
+                      base_d = {'type': rt, 'name': name, 'colour': colour, 'network': network}
+                      for chain in _chain_lines(lines):
+                          merged.append((chain, base_d))
+                  return merged
+              _n_ways_before = len(exporter.way_groups_buf)
+              merged_ways = _merge_way_groups(exporter.way_groups_buf)
+              print(f'Way segments merged: {_n_ways_before} -> {len(merged_ways)} chains')
+              for coords, base in merged_ways:
+                  wf.write(json.dumps({
+                      'type': 'Feature',
+                      'geometry': {'type': 'LineString', 'coordinates': coords},
+                      'properties': base,
+                  }) + '\n')
+
+              # Merge adjacent way-segments sharing an endpoint and identical symbol attributes into longer chains.
+              def _merge_symbol_groups(buf):
+                  by_key = {}
+                  for coords, base, symbol_vals in buf:
+                      key = (base['type'], base['name'], base['colour'], base['network'], tuple(symbol_vals))
+                      by_key.setdefault(key, []).append(coords)
+                  merged = []
+                  for (rt, name, colour, network, sym_tuple), lines in by_key.items():
+                      base_d = {'type': rt, 'name': name, 'colour': colour, 'network': network}
+                      sym_list = list(sym_tuple)
+                      for chain in _chain_lines(lines):
+                          merged.append((chain, base_d, sym_list))
+                  return merged
+              _n_before = len(exporter.symbol_groups_buf)
+              exporter.symbol_groups_buf = _merge_symbol_groups(exporter.symbol_groups_buf)
+              print(f'Symbol way-segments merged: {_n_before} -> {len(exporter.symbol_groups_buf)} chains')
+
+              # Write all merged symbol chains — one feature per symbol per chain.
+              symbol_point_count = 0
+              for coords, base, symbol_vals in exporter.symbol_groups_buf:
+                  for slot, symbol in enumerate(symbol_vals[:9]):
+                      sf.write(json.dumps({
+                          'type': 'Feature',
+                          'geometry': {'type': 'LineString', 'coordinates': coords},
+                          'properties': {**base, 'symbol': symbol, 'slot': slot},
+                      }) + '\n')
+                      symbol_point_count += 1
+              print(f'Symbol lines written: {symbol_point_count} (from {len(exporter.symbol_groups_buf)} merged chains)')
+
+          # Build per-relation route-line chains from collected way geometries.
+          def _stitch_ways(way_refs, way_coords):
+              lines = [way_coords[wid] for wid in way_refs if wid in way_coords]
+              return _chain_lines(lines)
+
+          routes_meta = []
+          route_feature_count = 0
+          with open('route-lines.geojsonseq', 'w') as rlf:
+              for rel_id, rel in collector.relations.items():
+                  chains = _stitch_ways(rel['way_ids'], exporter.way_coords)
+                  if not chains:
+                      continue
+                  all_coords = [pt for chain in chains for pt in chain]
+                  routes_meta.append({
+                      'id': rel_id,
+                      'name': rel['name'],
+                      'name_int': rel.get('name_int', ''),
+                      'symbol': rel['symbol'],
+                      'colour': rel['colour'],
+                      'network': rel['network'],
+                      'type': rel['type'],
+                      'min_lon': min(p[0] for p in all_coords),
+                      'min_lat': min(p[1] for p in all_coords),
+                      'max_lon': max(p[0] for p in all_coords),
+                      'max_lat': max(p[1] for p in all_coords),
+                      'distance_m': route_distance_m(chains),
+                  })
+                  props = {
+                      'relation_id': rel_id,
+                      'name': rel['name'],
+                      'symbol': rel['symbol'],
+                      'colour': rel['colour'],
+                      'network': rel['network'],
+                      'route_type': rel['type'],
+                  }
+                  for chain in chains:
+                      rlf.write(json.dumps({
+                          'type': 'Feature',
+                          'geometry': {'type': 'LineString', 'coordinates': chain},
+                          'properties': props,
+                      }) + '\n')
+                      route_feature_count += 1
+          with open('routes-meta.json', 'w') as f:
+              json.dump(routes_meta, f)
+          print(f'Route lines: {len(routes_meta)} routes, {route_feature_count} chain features')
+
+          # Write all unique non-empty osmc:symbol values for the image generation step.
+          osmc_symbols = sorted(exporter.osmc_symbols)
+          with open('osmc-symbols.txt', 'w') as f:
+              f.write('\n'.join(osmc_symbols) + '\n' if osmc_symbols else '')
+          print(f'Unique osmc:symbol values: {len(osmc_symbols)}')
+          PYEOF
+          rm tiles-filtered.osm.pbf tiles-latest.osm.pbf
+          echo "Hiking ways: $(wc -l < hiking-ways.geojsonseq)"
+          echo "Natural points: $(wc -l < natural-points.geojsonseq)"
+          echo "Hiking symbol points: $(wc -l < hiking-symbols.geojsonseq)"
+          echo "Route lines: $(wc -l < route-lines.geojsonseq)"
+          echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
+        env:
+          SYMBOL_TAG: ${{ inputs.symbol_tag }}
+
+      - name: Generate vector tiles with tippecanoe
+        run: |
+          tippecanoe \
+            --output hiking.mbtiles \
+            --minimum-zoom 5 \
+            --maximum-zoom 12 \
+            --low-detail 9 \
+            --drop-lines \
+            --drop-rate 1.3 \
+            --preserve-point-density-threshold 512 \
+            --single-precision \
+            --drop-densest-as-needed \
+            --force \
+            --named-layer=hiking_routes:hiking-ways.geojsonseq \
+            --named-layer=natural_points:natural-points.geojsonseq \
+            --named-layer=route_lines:route-lines.geojsonseq
+          tippecanoe \
+            --output hiking-symbols.mbtiles \
+            --minimum-zoom 5 \
+            --maximum-zoom 12 \
+            --low-detail 9 \
+            --drop-lines \
+            --drop-rate 25 \
+            --preserve-point-density-threshold 16 \
+            --single-precision \
+            --drop-densest-as-needed \
+            --force \
+            --named-layer=hiking_symbols:hiking-symbols.geojsonseq
+          tile-join --output ${{ inputs.country }}-hiking.mbtiles hiking.mbtiles hiking-symbols.mbtiles
+          echo "Hiking: $(du -sh ${{ inputs.country }}-hiking.mbtiles | cut -f1)"
+          rm hiking-ways.geojsonseq natural-points.geojsonseq hiking-symbols.geojsonseq route-lines.geojsonseq
+          cp base.mbtiles ${{ inputs.country }}-base.mbtiles
+          echo "Base: $(du -sh ${{ inputs.country }}-base.mbtiles | cut -f1)"
+
+      - name: Inject routes metadata table into MBTiles
+        env:
+          COUNTRY: ${{ inputs.country }}
+        run: |
+          python3 << 'PYEOF'
+          import sqlite3, json, os
+          with open('routes-meta.json') as f:
+              routes = json.load(f)
+          filename = f'{os.environ["COUNTRY"]}-hiking.mbtiles'
+          conn = sqlite3.connect(filename)
+          conn.execute('''
+              CREATE TABLE IF NOT EXISTS routes (
+                  id INTEGER PRIMARY KEY,
+                  name TEXT NOT NULL DEFAULT '',
+                  name_int TEXT NOT NULL DEFAULT '',
+                  symbol TEXT NOT NULL DEFAULT '',
+                  colour TEXT NOT NULL DEFAULT '',
+                  network TEXT NOT NULL DEFAULT '',
+                  route_type TEXT NOT NULL DEFAULT '',
+                  min_lon REAL,
+                  min_lat REAL,
+                  max_lon REAL,
+                  max_lat REAL,
+                  distance_m INTEGER
+              )
+          ''')
+          conn.executemany(
+              'INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+              [(r['id'], r['name'], r['name_int'], r['symbol'], r['colour'], r['network'], r['type'],
+                r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'])
+               for r in routes]
+          )
+          conn.commit()
+          conn.execute('VACUUM')
+          conn.close()
+          print(f'Injected {len(routes)} routes into metadata table')
+          PYEOF
+          rm routes-meta.json
+
+      - name: Generate and embed OSMC symbol images
+        uses: ./.github/actions/embed-osmc-symbols
+        with:
+          filename: ${{ inputs.country }}-hiking.mbtiles
+          embed_kct_symbols: ${{ inputs.symbol_tag == 'kct' }}
+          embed_jel_symbols: ${{ inputs.symbol_tag == 'jel' }}
+
+      - name: Compress tiles
+        run: tar -czf ${{ inputs.country }}-tiles.tar.gz ${{ inputs.country }}-base.mbtiles ${{ inputs.country }}-hiking.mbtiles
+
+      - name: Publish to GitHub Releases
+        run: |
+          NOTES="Auto-generated map tiles from OpenStreetMap data (ODbL).
+          Source: Geofabrik extracts
+          Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if gh release view tiles-latest &>/dev/null; then
+            gh release upload tiles-latest ${{ inputs.country }}-tiles.tar.gz --clobber
+            gh release edit tiles-latest --notes "$NOTES"
+          else
+            gh release create tiles-latest \
+              --title "Tiles (Latest)" \
+              --notes "$NOTES" \
+              ${{ inputs.country }}-tiles.tar.gz
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

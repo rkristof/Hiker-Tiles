@@ -1,0 +1,79 @@
+{
+    "layers": {
+        "place_labels": {
+            "minzoom": 6,
+            "maxzoom": 14,
+            "z_order_ascending": false,
+            "combine_lines_below": 15
+        },
+        "boundaries": {
+            "minzoom": 7,
+            "maxzoom": 14,
+            "simplify_below": 15,
+            "simplify_level": 0.0005,
+            "combine_lines_below": 15
+        },
+        "streets": {
+            "minzoom": 14,
+            "maxzoom": 14,
+            "simplify_level": 0.0005,
+            "combine_lines_below": 15
+        },
+        "streets_med": {
+            "minzoom": 11,
+            "maxzoom": 13,
+            "simplify_below": 15,
+            "simplify_level": 0.00025,
+            "combine_lines_below": 15,
+            "write_to": "streets"
+        },
+        "streets_low": {
+            "minzoom": 5,
+            "maxzoom": 10,
+            "simplify_below": 15,
+            "simplify_level": 0.0001,
+            "combine_lines_below": 15,
+            "write_to": "streets"
+        },
+        "water_polygons": {
+            "minzoom": 5,
+            "maxzoom": 14,
+            "simplify_below": 15,
+            "simplify_level": 0.0002,
+            "filter_below": 14,
+            "filter_area": 1,
+            "combine_lines_below": 15
+        },
+        "land": {
+            "minzoom": 5,
+            "maxzoom": 14,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 14,
+            "filter_area": 1,
+            "combine_lines_below": 15
+        },
+        "pois": {
+            "minzoom": 14,
+            "maxzoom": 14,
+            "combine_lines_below": 15
+        }
+    },
+    "settings": {
+        "minzoom": 0,
+        "maxzoom": 14,
+        "basezoom": 14,
+        "include_ids": false,
+        "name": "Shortbread",
+        "version": "1.0",
+        "description": "Tile config for a simple vector tiles schema",
+        "compress": "gzip",
+        "filemetadata": {
+            "tilejson": "2.0.0",
+            "scheme": "xyz",
+            "type": "baselayer",
+            "format": "pbf"
+        }
+    }
+}

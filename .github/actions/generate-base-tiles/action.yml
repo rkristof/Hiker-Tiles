@@ -1,0 +1,49 @@
+name: Generate base tiles
+description: >
+  Generates Shortbread vector tiles for the base layers from the OSM extract
+
+inputs:
+  country:
+    description: Geofabrik country ID (used to select Latin/non-Latin label rendering)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install runtime dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          lua5.3 \
+          liblua5.3-dev \
+          libboost-filesystem-dev \
+          libboost-program-options-dev \
+          libboost-system-dev \
+          libshp-dev \
+          libsqlite3-dev
+
+    - name: Download Tilemaker binary
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release download tilemaker-latest \
+          --repo ${{ github.repository }} \
+          --pattern 'tilemaker-linux-amd64.tar.gz' \
+          --output tilemaker.tar.gz
+        tar -xzf tilemaker.tar.gz
+        sudo mv tilemaker /usr/local/bin/
+        rm tilemaker.tar.gz
+
+    - name: Generate base map tiles
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        tilemaker \
+        --config .github/config.json \
+        --process .github/process.lua \
+        --bbox -180,-90,180,90 \
+        --input tiles-latest.osm.pbf \
+        --output base.mbtiles

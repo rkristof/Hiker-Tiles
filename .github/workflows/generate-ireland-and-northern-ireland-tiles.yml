@@ -1,0 +1,14 @@
+name: Generate Ireland and Northern Ireland Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    uses: ./.github/workflows/generate-tiles.yml
+    with:
+      country: ireland-and-northern-ireland
+    secrets: inherit

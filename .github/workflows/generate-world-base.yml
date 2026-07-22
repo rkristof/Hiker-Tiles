@@ -1,0 +1,142 @@
+name: Generate World Base Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tippecanoe gdal-bin unzip
+
+      - name: Download Natural Earth sources
+        run: |
+          # Country boundary lines (land borders, no coastline)
+          wget -q -L "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_boundary_lines_land.zip" -O ne-boundaries.zip
+          # Curated country label placement points
+          wget -q -L "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip" -O ne-labels.zip
+
+      - name: Build boundaries layer
+        run: |
+          unzip -q ne-boundaries.zip -d ne-boundaries-raw/
+          rm ne-boundaries.zip
+          SHP=$(find ne-boundaries-raw/ -name "*.shp" | head -1)
+          ogr2ogr -f GeoJSONSeq -select "" boundaries.geojsonseq "$SHP"
+          rm -rf ne-boundaries-raw/
+          echo "Boundary line features: $(wc -l < boundaries.geojsonseq)"
+
+          tippecanoe \
+            --output boundaries.mbtiles \
+            --minimum-zoom 0 \
+            --maximum-zoom 10 \
+            --simplification 10 \
+            --reorder \
+            --hilbert \
+            --coalesce \
+            --single-precision \
+            --force \
+            --named-layer=boundaries:boundaries.geojsonseq
+          rm boundaries.geojsonseq
+          echo "boundaries.mbtiles: $(du -sh boundaries.mbtiles | cut -f1)"
+
+      - name: Build labels layer
+        run: |
+          unzip -q ne-labels.zip -d ne-labels-raw/
+          rm ne-labels.zip
+          SHP=$(find ne-labels-raw/ -name "*.shp" | head -1)
+          # Keep only the NAME field — the only attribute read by HikerMapView
+          ogr2ogr -f GeoJSONSeq  -dialect SQLite -sql "SELECT MakePoint(LABEL_X, LABEL_Y, 4326) AS geometry, NAME FROM ne_110m_admin_0_countries" labels.geojsonseq "$SHP"
+          rm -rf ne-labels-raw/
+          echo "Label point features: $(wc -l < labels.geojsonseq)"
+
+          # ~250 country points — never drop any
+          tippecanoe \
+            --output labels.mbtiles \
+            --minimum-zoom 0 \
+            --maximum-zoom 5 \
+            --no-feature-limit \
+            --no-tile-size-limit \
+            --hilbert \
+            --single-precision \
+            --drop-rate 0 \
+            --force \
+            --named-layer=labels:labels.geojsonseq
+          rm labels.geojsonseq
+          echo "labels.mbtiles: $(du -sh labels.mbtiles | cut -f1)"
+
+      - name: Download OSM land polygons
+        run: |
+          wget -q https://osmdata.openstreetmap.de/download/land-polygons-complete-4326.zip -O land-polygons.zip
+          echo "Downloaded: $(du -sh land-polygons.zip | cut -f1)"
+
+      - name: Build land layer
+        run: |
+          unzip -q land-polygons.zip -d land-raw/
+          rm land-polygons.zip
+          # Locate the shapefile regardless of the exact directory name in the zip
+          SHP=$(find land-raw/ -name "*.shp" | head -1)
+          echo "Converting: $SHP"
+          ogr2ogr -f GeoJSONSeq -select "" land.geojsonseq "$SHP"
+          rm -rf land-raw/
+          echo "Land polygon features: $(wc -l < land.geojsonseq)"
+          df -h .
+
+          # Run tippecanoe immediately to free the ~4 GB GeoJSON before NE processing
+          tippecanoe \
+            --output land.mbtiles \
+            --minimum-zoom 0 \
+            --maximum-zoom 10 \
+            --simplification 10 \
+            --drop-smallest-as-needed \
+            --coalesce-smallest-as-needed \
+            --reorder \
+            --hilbert \
+            --coalesce \
+            --single-precision \
+            --force \
+            --named-layer=land:land.geojsonseq
+          rm land.geojsonseq
+          echo "land.mbtiles: $(du -sh land.mbtiles | cut -f1)"
+
+      - name: Merge layers
+        run: |
+          tile-join \
+            --output world-base.mbtiles \
+            --force \
+            land.mbtiles \
+            boundaries.mbtiles \
+            labels.mbtiles
+          rm land.mbtiles boundaries.mbtiles labels.mbtiles
+          echo "world-base.mbtiles: $(du -sh world-base.mbtiles | cut -f1)"
+
+      - name: Publish to GitHub Releases
+        run: |
+          gzip -9 world-base.mbtiles
+          NOTES="World base tiles built from OSM land polygons and Natural Earth data.
+          Sources:
+            OSM Land Polygons (ODbL): https://osmdata.openstreetmap.de/data/land-polygons.html
+            Natural Earth 10m cultural (public domain): https://www.naturalearthdata.com/downloads/10m-cultural-vectors/
+            Natural Earth 110m cultural (public domain): https://www.naturalearthdata.com/downloads/110m-cultural-vectors/
+          Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if gh release view world-base-latest &>/dev/null; then
+            gh release upload world-base-latest world-base.mbtiles.gz --clobber
+            gh release edit world-base-latest --notes "$NOTES"
+          else
+            gh release create world-base-latest \
+              --title "World Base Tiles (Latest)" \
+              --notes "$NOTES" \
+              world-base.mbtiles.gz
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

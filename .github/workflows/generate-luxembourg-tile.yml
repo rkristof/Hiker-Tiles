@@ -1,0 +1,14 @@
+name: Generate Luxembourg Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    uses: ./.github/workflows/generate-tiles.yml
+    with:
+      country: luxembourg
+    secrets: inherit
