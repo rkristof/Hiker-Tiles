@@ -1,0 +1,54 @@
+name: Build Tilemaker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libboost-dev \
+            libboost-filesystem-dev \
+            libboost-program-options-dev \
+            libboost-system-dev \
+            lua5.3 \
+            liblua5.3-dev \
+            libshp-dev \
+            libsqlite3-dev \
+            rapidjson-dev
+
+      - name: Build Tilemaker
+        run: |
+          git clone https://github.com/systemed/tilemaker
+          cd tilemaker
+          make -j$(nproc)
+          sudo make install
+          tar -czf tilemaker-linux-amd64.tar.gz -C /usr/local/bin tilemaker
+
+      - name: Publish to GitHub Releases
+        run: |
+          NOTES="Pre-built Tilemaker binary for ubuntu-24.04 (amd64).
+            Runtime dependencies required on the consuming runner:
+            sudo apt-get install -y lua5.3 liblua5.3-dev libboost-filesystem-dev libboost-program-options-dev libboost-system-dev libshp-dev libsqlite3-dev"
+
+          if gh release view tilemaker-latest --repo ${{ github.repository }} &>/dev/null; then
+            gh release upload tilemaker-latest tilemaker/tilemaker-linux-amd64.tar.gz --clobber --repo ${{ github.repository }}
+            gh release edit tilemaker-latest --notes "$NOTES" --repo ${{ github.repository }}
+          else
+            gh release create tilemaker-latest \
+              --title "Tilemaker (Latest)" \
+              --notes "$NOTES" \
+              --repo ${{ github.repository }} \
+              tilemaker/tilemaker-linux-amd64.tar.gz
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
