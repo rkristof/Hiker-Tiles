@@ -1,0 +1,14 @@
+name: Generate Belgium Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    uses: ./.github/workflows/generate-tiles.yml
+    with:
+      country: belgium
+    secrets: inherit

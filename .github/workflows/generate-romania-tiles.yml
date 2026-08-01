@@ -1,0 +1,14 @@
+name: Generate Romania Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    uses: ./.github/workflows/generate-tiles.yml
+    with:
+      country: romania
+    secrets: inherit

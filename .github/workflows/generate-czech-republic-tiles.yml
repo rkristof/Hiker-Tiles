@@ -1,0 +1,15 @@
+name: Generate Czech Republic Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    uses: ./.github/workflows/generate-tiles.yml
+    with:
+      country: czech-republic
+      symbol_tag: kct
+    secrets: inherit
