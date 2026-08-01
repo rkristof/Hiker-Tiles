@@ -1,0 +1,48 @@
+{
+    "layers": {
+        "land": {
+            "minzoom": 0,
+            "maxzoom": 9,
+            "source": "land.geojsonseq",
+            "source_columns": [],
+            "simplify_below": 9,
+            "simplify_level": 0.0025,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 9,
+            "filter_area": 12.5
+        },
+        "labels": {
+            "minzoom": 0,
+            "maxzoom": 5,
+            "source": "labels.geojsonseq",
+            "source_columns": ["NAME"],
+            "combine_points": false
+        },
+        "boundaries": {
+            "minzoom": 0,
+            "maxzoom": 9,
+            "source": "boundaries.geojsonseq",
+            "source_columns": [],
+            "simplify_below": 9,
+            "simplify_level": 0.0025,
+            "combine_points": false,
+            "combine_lines_below": 10
+        }
+    },
+    "settings": {
+        "minzoom": 0,
+        "maxzoom": 9,
+        "basezoom": 9,
+        "include_ids": false,
+        "compress": "gzip",
+        "name": "World Base",
+        "version": "1.0",
+        "description": "World base tiles from OSM land polygons and Natural Earth labels",
+        "filemetadata": {
+            "tilejson": "2.0.0",
+            "scheme": "xyz",
+            "type": "baselayer",
+            "format": "pbf"
+        }
+    }
+}
