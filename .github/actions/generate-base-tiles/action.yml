@@ -13,8 +13,7 @@ runs:
     - name: Install runtime dependencies
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        sudo apt-get install -y --no-install-recommends \
           lua5.3 \
           liblua5.3-dev \
           libboost-filesystem-dev \

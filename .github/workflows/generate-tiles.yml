@@ -27,6 +27,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Fix apt cache permissions
+        run: sudo mkdir -p /var/cache/apt/archives && sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives/*.deb
+          key: apt-${{ runner.os }}-packages-v1
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-packages-v1
+
       - name: Download OSM extract
         run: |
           echo "Downloading ${{ inputs.country }} OSM extract from Geofabrik"
@@ -37,7 +52,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get install -y tippecanoe osmium-tool
+          sudo apt-get install -y --no-install-recommends tippecanoe osmium-tool
           pip3 install osmium rasterio
 
       - name: Generate base map tiles
