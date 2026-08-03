@@ -1,0 +1,216 @@
+name: Download elevation tiles
+description: Selects Copernicus GLO-30 1-degree tiles intersecting a Geofabrik .poly file and downloads their DEM GeoTIFFs.
+
+inputs:
+  country:
+    description: Geofabrik country ID used to download the country boundary polygon.
+    required: true
+  output_directory:
+    description: Directory where GLO-30 DEM GeoTIFFs and the tile manifest are stored.
+    required: false
+    default: elevation-tiles
+
+outputs:
+  manifest:
+    description: Path to the manifest containing downloaded GLO-30 tile names.
+    value: ${{ steps.download.outputs.manifest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download OSM .poly file
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        : "${COUNTRY:?COUNTRY input is required}"
+        echo "Downloading ${COUNTRY} OSM .poly file from Geofabrik"
+        wget -q \
+          "https://download.geofabrik.de/europe/${COUNTRY}.poly" \
+          -O extent.poly
+        echo "Downloaded: $(du -sh extent.poly | cut -f1)"
+
+    - name: Install GLO-30 tile selection dependency
+      shell: bash
+      run: |
+        pip3 install --quiet shapely
+
+    - name: Select and download GLO-30 tiles
+      id: download
+      shell: bash
+      env:
+        OUTPUT_DIRECTORY: ${{ inputs.output_directory }}
+      run: |
+        python3 << 'PYEOF'
+        import concurrent.futures
+        import math
+        import os
+        import tempfile
+        import urllib.error
+        import urllib.request
+
+        from shapely.geometry import MultiPolygon, Polygon, box
+        from shapely.ops import unary_union
+
+
+        OUTPUT_DIRECTORY = os.environ['OUTPUT_DIRECTORY']
+        MANIFEST_PATH = os.path.join(OUTPUT_DIRECTORY, 'manifest.txt')
+        BASE_URL = 'https://copernicus-dem-30m.s3.amazonaws.com'
+
+
+        def parse_poly(path):
+          rings = []
+          ring = []
+          is_hole = False
+
+          with open(path) as poly_file:
+            for raw_line in poly_file:
+              line = raw_line.strip()
+              if not line:
+                continue
+              if line.upper() == 'END':
+                if ring:
+                  rings.append((is_hole, ring))
+                  ring = []
+                  is_hole = False
+                continue
+
+              parts = line.split()
+              if len(parts) == 2:
+                try:
+                  ring.append((float(parts[0]), float(parts[1])))
+                  continue
+                except ValueError:
+                  pass
+
+              if not ring:
+                is_hole = line.startswith('!')
+
+          if ring:
+            rings.append((is_hole, ring))
+
+          if not rings:
+            raise ValueError(f'No coordinate rings found in {path}')
+
+          polygons = []
+          outer = None
+          holes = []
+          for ring_is_hole, coordinates in rings:
+            if ring_is_hole:
+              if outer is None:
+                raise ValueError(f'Hole ring appears before an outer ring in {path}')
+              holes.append(coordinates)
+              continue
+            if outer is not None:
+              polygons.append(Polygon(outer, holes))
+            outer = coordinates
+            holes = []
+          if outer is not None:
+            polygons.append(Polygon(outer, holes))
+
+          geometry = unary_union(polygons)
+          if not geometry.is_valid:
+            geometry = geometry.buffer(0)
+          if geometry.is_empty or not isinstance(geometry, (Polygon, MultiPolygon)):
+            raise ValueError(f'Invalid or empty polygon geometry in {path}')
+          return geometry
+
+
+        def tile_token(value, positive_prefix, negative_prefix, width):
+          prefix = positive_prefix if value >= 0 else negative_prefix
+          return f'{prefix}{abs(value):0{width}d}_00'
+
+
+        def tile_name(latitude, longitude):
+          northing = tile_token(latitude, 'N', 'S', 2)
+          easting = tile_token(longitude, 'E', 'W', 3)
+          return f'Copernicus_DSM_COG_10_{northing}_{easting}_DEM'
+
+
+        def tile_url(name):
+          return f'{BASE_URL}/{name}/{name}.tif'
+
+
+        def tile_size(url):
+          request = urllib.request.Request(url, method='HEAD')
+          try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+              return int(response.headers.get('Content-Length', '0'))
+          except urllib.error.HTTPError as error:
+            if error.code == 404:
+              return None
+            raise
+
+
+        def download_tile(url, destination):
+          with tempfile.NamedTemporaryFile(dir=OUTPUT_DIRECTORY, delete=False) as temporary:
+            temporary_path = temporary.name
+          try:
+            with urllib.request.urlopen(url, timeout=120) as response, open(temporary_path, 'wb') as output:
+              while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+            os.replace(temporary_path, destination)
+          except Exception:
+            if os.path.exists(temporary_path):
+              os.unlink(temporary_path)
+            raise
+
+
+        def process_tile(latitude, longitude, name):
+          url = tile_url(name)
+          destination = os.path.join(OUTPUT_DIRECTORY, f'{name}.tif')
+          expected_size = tile_size(url)
+          if expected_size is None:
+            print(f'Skipping unavailable tile: {name} ({latitude}, {longitude})')
+            return 'skipped', name
+
+          if os.path.exists(destination) and os.path.getsize(destination) == expected_size:
+            print(f'Keeping existing tile: {name}')
+            return 'downloaded', name
+
+          download_tile(url, destination)
+          print(f'Downloaded: {name} ({os.path.getsize(destination) / 1024 / 1024:.1f} MiB)')
+          return 'downloaded', name
+
+
+        country = parse_poly('extent.poly')
+        min_lon, min_lat, max_lon, max_lat = country.bounds
+        candidates = []
+        for latitude in range(math.floor(min_lat), math.ceil(max_lat)):
+          for longitude in range(math.floor(min_lon), math.ceil(max_lon)):
+            cell = box(longitude, latitude, longitude + 1, latitude + 1)
+            if country.intersects(cell):
+              candidates.append((latitude, longitude, tile_name(latitude, longitude)))
+
+        os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
+        downloaded = []
+        skipped = []
+        # threads, not processes: work here is network I/O, not CPU-bound
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+          futures = [
+            executor.submit(process_tile, latitude, longitude, name)
+            for latitude, longitude, name in candidates
+          ]
+          for future in concurrent.futures.as_completed(futures):
+            status, name = future.result()
+            (downloaded if status == 'downloaded' else skipped).append(name)
+
+        # sort since as_completed() order is nondeterministic, keeping manifest diffs stable
+        downloaded.sort()
+
+        with open(MANIFEST_PATH, 'w') as manifest:
+          manifest.write('\n'.join(downloaded))
+          if downloaded:
+            manifest.write('\n')
+
+        github_output = os.environ.get('GITHUB_OUTPUT')
+        if github_output:
+          with open(github_output, 'a') as output:
+            output.write(f'manifest={MANIFEST_PATH}\n')
+
+        total_size = sum(os.path.getsize(os.path.join(OUTPUT_DIRECTORY, f'{name}.tif')) for name in downloaded)
+        print(f'GLO-30 candidates: {len(candidates)}')
+        print(f'GLO-30 unavailable/ocean tiles: {len(skipped)}')
+        print(f'GLO-30 tiles downloaded: {len(downloaded)}')
+        print(f'GLO-30 data size: {total_size / 1024 / 1024:.1f} MiB')
+        PYEOF

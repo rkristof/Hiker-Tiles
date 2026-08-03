@@ -38,12 +38,18 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get install -y tippecanoe osmium-tool
-          pip3 install osmium
+          pip3 install osmium rasterio
 
       - name: Generate base map tiles
         uses: ./.github/actions/generate-base-tiles
         with:
           country: ${{ inputs.country }}
+
+      - name: Download elevation tiles
+        uses: ./.github/actions/download-elevation-tiles
+        with:
+          country: ${{ inputs.country }}
+          output_directory: elevation-tiles
 
       - name: Extract hiking routes with route attributes to GeoJSON
         run: |
@@ -58,6 +64,7 @@ jobs:
           echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
           python3 << 'PYEOF'
           import osmium, json, os, math
+          import rasterio
 
           class WayRouteCollector(osmium.SimpleHandler):
               def __init__(self):
@@ -216,6 +223,74 @@ jobs:
                   for a, b in zip(chain, chain[1:]):
                       total += haversine(a, b)
               return round(total)
+
+          def elevation_tile_name(latitude, longitude):
+              lat_prefix = 'N' if latitude >= 0 else 'S'
+              lon_prefix = 'E' if longitude >= 0 else 'W'
+              return (
+                  f'Copernicus_DSM_COG_10_{lat_prefix}{abs(latitude):02d}_00_'
+                  f'{lon_prefix}{abs(longitude):03d}_00_DEM'
+              )
+
+          class ElevationSampler:
+              # Reads each DEM tile fully into a numpy array once and indexes it directly,
+              # instead of calling dataset.sample() per point (GDAL's per-call overhead
+              # makes point-by-point sampling far too slow for millions of route vertices).
+              def __init__(self, directory):
+                  self.directory = directory
+                  self.tiles = {}  # path -> (band array, inverse transform, nodata) or None
+
+              def _load(self, path):
+                  if path not in self.tiles:
+                      if os.path.exists(path):
+                          with rasterio.open(path) as dataset:
+                              self.tiles[path] = (dataset.read(1), ~dataset.transform, dataset.nodata)
+                      else:
+                          self.tiles[path] = None
+                  return self.tiles[path]
+
+              def sample(self, point):
+                  longitude, latitude = point
+                  tile_name = elevation_tile_name(math.floor(latitude), math.floor(longitude))
+                  path = os.path.join(self.directory, f'{tile_name}.tif')
+                  tile = self._load(path)
+                  if tile is None:
+                      return None
+
+                  band, inverse_transform, nodata = tile
+                  col, row = inverse_transform * (longitude, latitude)
+                  row, col = int(row), int(col)
+                  if row < 0 or row >= band.shape[0] or col < 0 or col >= band.shape[1]:
+                      return None
+
+                  value = band[row, col]
+                  if nodata is not None and value == nodata:
+                      return None
+                  value = float(value)
+                  return value if math.isfinite(value) else None
+
+              def close(self):
+                  self.tiles.clear()
+
+          def route_elevation_change(chains, sampler):
+              gain = 0.0
+              loss = 0.0
+              threshold = 2.0
+              for chain in chains:
+                  previous = None
+                  for point in chain:
+                      current = sampler.sample(point)
+                      if current is None:
+                          previous = None
+                          continue
+                      if previous is not None:
+                          delta = current - previous
+                          if delta >= threshold:
+                              gain += delta
+                          elif delta <= -threshold:
+                              loss -= delta
+                      previous = current
+              return round(gain), round(loss)
                 
           with open('hiking-ways.geojsonseq', 'w') as wf, \
                open('natural-points.geojsonseq', 'w') as pf, \
@@ -287,12 +362,14 @@ jobs:
 
           routes_meta = []
           route_feature_count = 0
+          elevation_sampler = ElevationSampler(os.environ['ELEVATION_DIRECTORY'])
           with open('route-lines.geojsonseq', 'w') as rlf:
               for rel_id, rel in collector.relations.items():
                   chains = _stitch_ways(rel['way_ids'], exporter.way_coords)
                   if not chains:
                       continue
                   all_coords = [pt for chain in chains for pt in chain]
+                  elevation_gain_m, elevation_loss_m = route_elevation_change(chains, elevation_sampler)
                   routes_meta.append({
                       'id': rel_id,
                       'name': rel['name'],
@@ -306,6 +383,8 @@ jobs:
                       'max_lon': max(p[0] for p in all_coords),
                       'max_lat': max(p[1] for p in all_coords),
                       'distance_m': route_distance_m(chains),
+                      'elevation_gain_m': elevation_gain_m,
+                      'elevation_loss_m': elevation_loss_m,
                   })
                   props = {
                       'relation_id': rel_id,
@@ -322,6 +401,7 @@ jobs:
                           'properties': props,
                       }) + '\n')
                       route_feature_count += 1
+          elevation_sampler.close()
           with open('routes-meta.json', 'w') as f:
               json.dump(routes_meta, f)
           print(f'Route lines: {len(routes_meta)} routes, {route_feature_count} chain features')
@@ -332,13 +412,14 @@ jobs:
               f.write('\n'.join(osmc_symbols) + '\n' if osmc_symbols else '')
           print(f'Unique osmc:symbol values: {len(osmc_symbols)}')
           PYEOF
-          rm tiles-filtered.osm.pbf tiles-latest.osm.pbf
+          rm -rf tiles-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
           echo "Hiking ways: $(wc -l < hiking-ways.geojsonseq)"
           echo "Natural points: $(wc -l < natural-points.geojsonseq)"
           echo "Hiking symbol points: $(wc -l < hiking-symbols.geojsonseq)"
           echo "Route lines: $(wc -l < route-lines.geojsonseq)"
           echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
         env:
+          ELEVATION_DIRECTORY: elevation-tiles
           SYMBOL_TAG: ${{ inputs.symbol_tag }}
 
       - name: Generate vector tiles with tippecanoe
@@ -398,13 +479,22 @@ jobs:
                   min_lat REAL,
                   max_lon REAL,
                   max_lat REAL,
-                  distance_m INTEGER
+                  distance_m INTEGER,
+                  elevation_gain_m INTEGER,
+                  elevation_loss_m INTEGER
               )
           ''')
           conn.executemany(
-              'INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+              '''
+              INSERT OR REPLACE INTO routes (
+                  id, name, name_int, symbol, colour, network, route_type,
+                  min_lon, min_lat, max_lon, max_lat, distance_m,
+                  elevation_gain_m, elevation_loss_m
+              ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              ''',
               [(r['id'], r['name'], r['name_int'], r['symbol'], r['colour'], r['network'], r['type'],
-                r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'])
+                r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
+                r['elevation_gain_m'], r['elevation_loss_m'])
                for r in routes]
           )
           conn.commit()
