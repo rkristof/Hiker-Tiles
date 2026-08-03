@@ -224,6 +224,13 @@ jobs:
                       total += haversine(a, b)
               return round(total)
 
+          def route_duration_min(distance_m, elevation_gain_m, elevation_loss_m):
+              # Calculate duration using DIN standard 33466
+              horizontal_minutes = distance_m / 1000 * 60 / 4
+              vertical_minutes = (elevation_gain_m / 300 * 60) + (elevation_loss_m / 500 * 60)
+              total_minutes = max(horizontal_minutes, vertical_minutes) + min(horizontal_minutes, vertical_minutes) / 2
+              return int(round(total_minutes / 15) * 15)
+
           def elevation_tile_name(latitude, longitude):
               lat_prefix = 'N' if latitude >= 0 else 'S'
               lon_prefix = 'E' if longitude >= 0 else 'W'
@@ -370,6 +377,8 @@ jobs:
                       continue
                   all_coords = [pt for chain in chains for pt in chain]
                   elevation_gain_m, elevation_loss_m = route_elevation_change(chains, elevation_sampler)
+                  distance_m = route_distance_m(chains)
+                  duration_min = route_duration_min(distance_m, elevation_gain_m, elevation_loss_m)
                   routes_meta.append({
                       'id': rel_id,
                       'name': rel['name'],
@@ -382,9 +391,10 @@ jobs:
                       'min_lat': min(p[1] for p in all_coords),
                       'max_lon': max(p[0] for p in all_coords),
                       'max_lat': max(p[1] for p in all_coords),
-                      'distance_m': route_distance_m(chains),
+                      'distance_m': distance_m,
                       'elevation_gain_m': elevation_gain_m,
                       'elevation_loss_m': elevation_loss_m,
+                      'duration_min': duration_min,
                   })
                   props = {
                       'relation_id': rel_id,
@@ -481,7 +491,8 @@ jobs:
                   max_lat REAL,
                   distance_m INTEGER,
                   elevation_gain_m INTEGER,
-                  elevation_loss_m INTEGER
+                  elevation_loss_m INTEGER,
+                  duration_min INTEGER
               )
           ''')
           conn.executemany(
@@ -489,12 +500,12 @@ jobs:
               INSERT OR REPLACE INTO routes (
                   id, name, name_int, symbol, colour, network, route_type,
                   min_lon, min_lat, max_lon, max_lat, distance_m,
-                  elevation_gain_m, elevation_loss_m
-              ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  elevation_gain_m, elevation_loss_m, duration_min
+              ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
               ''',
               [(r['id'], r['name'], r['name_int'], r['symbol'], r['colour'], r['network'], r['type'],
                 r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
-                r['elevation_gain_m'], r['elevation_loss_m'])
+                r['elevation_gain_m'], r['elevation_loss_m'], r['duration_min'])
                for r in routes]
           )
           conn.commit()
