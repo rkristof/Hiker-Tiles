@@ -2,66 +2,84 @@
     "layers": {
         "place_labels": {
             "minzoom": 6,
-            "maxzoom": 14,
+            "maxzoom": 13,
             "z_order_ascending": false,
-            "combine_lines_below": 15
+            "combine_lines_below": 14
         },
         "streets": {
-            "minzoom": 14,
-            "maxzoom": 14,
-            "simplify_level": 0.0005,
-            "combine_lines_below": 15
+            "minzoom": 13,
+            "maxzoom": 13,
+            "simplify_below": 14,
+            "simplify_level": 0.00002,
+            "combine_lines_below": 14
         },
         "streets_med": {
-            "minzoom": 11,
-            "maxzoom": 13,
-            "simplify_below": 15,
-            "simplify_level": 0.00025,
-            "combine_lines_below": 15,
+            "minzoom": 9,
+            "maxzoom": 12,
+            "simplify_below": 14,
+            "simplify_level": 0.000075,
+            "combine_lines_below": 14,
             "write_to": "streets"
         },
         "streets_low": {
             "minzoom": 5,
-            "maxzoom": 10,
-            "simplify_below": 15,
-            "simplify_level": 0.0001,
-            "combine_lines_below": 15,
+            "maxzoom": 8,
+            "simplify_below": 14,
+            "simplify_level": 0.000075,
+            "combine_lines_below": 14,
             "write_to": "streets"
         },
         "water_polygons": {
             "minzoom": 5,
-            "maxzoom": 14,
-            "simplify_below": 15,
-            "simplify_level": 0.0001,
+            "maxzoom": 13,
+            "simplify_below": 14,
+            "simplify_level": 0.00015,
             "filter_below": 14,
-            "filter_area": 1,
-            "combine_lines_below": 15
+            "filter_area": 0.5,
+            "combine_lines_below": 14
         },
         "land": {
-            "minzoom": 5,
-            "maxzoom": 14,
+            "minzoom": 0,
+            "maxzoom": 13
+        },
+        "residential": {
+            "minzoom": 8,
+            "maxzoom": 13,
             "simplify_below": 14,
-            "simplify_level": 0.0001,
+            "simplify_level": 0.00002,
             "simplify_algorithm": "visvalingam",
-            "filter_below": 14,
-            "filter_area": 1,
-            "combine_lines_below": 15
+            "filter_below": 15,
+            "filter_area": 0.2,
+            "combine_lines_below": 14,
+            "write_to": "land"
+        },
+        "natural": {
+            "minzoom": 0,
+            "maxzoom": 13,
+            "simplify_below": 13,
+            "simplify_level": 0.0003,
+            "simplify_ratio": 1.5,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14,
+            "write_to": "land"
         },
         "pois": {
-            "minzoom": 14,
-            "maxzoom": 14,
-            "combine_lines_below": 15
+            "minzoom": 13,
+            "maxzoom": 13,
+            "combine_lines_below": 14
         }
     },
     "settings": {
-        "minzoom": 5,
-        "maxzoom": 14,
-        "basezoom": 14,
+        "minzoom": 0,
+        "maxzoom": 13,
+        "basezoom": 13,
         "include_ids": false,
         "name": "Shortbread",
         "version": "1.0",
         "description": "Tile config for a simple vector tiles schema",
-        "compress": "gzip",
+        "compress": "deflate",
         "filemetadata": {
             "tilejson": "2.0.0",
             "scheme": "xyz",

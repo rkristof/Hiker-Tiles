@@ -34,7 +34,7 @@
         "maxzoom": 9,
         "basezoom": 9,
         "include_ids": false,
-        "compress": "gzip",
+        "compress": "deflate",
         "name": "World Base",
         "version": "1.0",
         "description": "World base tiles from OSM land polygons and Natural Earth labels",

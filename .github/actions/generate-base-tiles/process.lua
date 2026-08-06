@@ -56,7 +56,7 @@ function setZOrder()
 	local highway = Find("highway")
 	local layer = tonumber(Find("layer"))
 	local zOrder = 0
-	local Z_STEP = 14
+	local Z_STEP = 13
 	if not (layer == nil) then
 		if layer > 7 then
 			layer = 7
@@ -199,52 +199,67 @@ function process_land()
 	local wetland = Find("wetland")
 	local leisure = Find("leisure")
 	local kind = ""
+	local layer = ""
 	local mz = inf_zoom
 	if landuse == "forest" or landuse == "grass" or landuse == "farmland" then
 		kind = landuse
-		mz = 5
+		layer = "natural"
+		mz = 0
 	elseif natural == "wood" then
 		kind = "forest"
-		mz = 5
+		layer = "natural"
+		mz = 0
+	elseif natural == "grassland" or landuse == "meadow" then
+		kind = "grass"
+		layer = "natural"
+		mz = 0
+	elseif landuse == "orchard" or landuse == "vineyard" or landuse == "farmyard" or landuse == "greenhouse_horticulture" then
+		kind = "farmland"
+		layer = "natural"
+		mz = 0
+	elseif natural == "glacier" or natural == "bare_rock" then
+		kind = natural
+		layer = "natural"
+		mz = 0
 	elseif landuse == "residential" or landuse == "industrial" then
 		kind = landuse
-		mz = 6
+		layer = "residential"
+		mz = 8
 	elseif landuse == "commercial" then
 		kind = "residential"
-		mz = 6
-	elseif landuse == "quarry" then
-		kind = landuse
+		layer = "residential"
 		mz = 8
 	elseif landuse == "construction" then
 		kind = "residential"
+		layer = "residential"
 		mz = 8
-	elseif landuse == "orchard" or landuse == "vineyard" or landuse == "farmyard" or landuse == "greenhouse_horticulture" then
-		kind = "farmland"
-		mz = 7
-	elseif landuse == "cemetery" then
-		kind = "grass"
+	elseif landuse == "quarry" then
+		kind = landuse
+		layer = "natural"
 		mz = 8
-	elseif natural == "glacier" or natural == "bare_rock" then
-		kind = natural
-		mz = 5
 	elseif natural == "sand" or natural == "heath" or natural == "scrub" or natural == "scree" or natural == "shingle" then
 		kind = natural
-		mz = 7
-	elseif natural == "grassland" or landuse == "meadow" then
-		kind = "grass"
-		mz = 6
+		layer = "natural"
+		mz = 8
 	elseif wetland == "swamp" or wetland == "bog" or wetland == "wet_meadow" or wetland == "marsh" then
 		kind = wetland
-		mz = 7
+		layer = "natural"
+		mz = 8
 	elseif natural == "wetland" then
 		kind = "marsh"
-		mz = 7
+		layer = "natural"
+		mz = 8
+	elseif landuse == "cemetery" then
+		kind = "grass"
+		layer = "residential"
+		mz = 11
 	elseif leisure == "park" then
 		kind = leisure
-		mz = 10
+		layer = "residential"
+		mz = 11
 	end
 	if mz < inf_zoom then
-		Layer("land", true)
+		Layer(layer, true)
 		MinZoom(mz)
 		Attribute("kind", kind)
 	end
@@ -264,35 +279,35 @@ function process_streets()
 			mz = 6
 			kind = "trunk"
 		elseif highway == "primary" or highway == "primary_link" then
-			mz = 8
+			mz = 7
 			kind = "primary"
 		elseif highway == "secondary" or highway == "secondary_link" then
-			mz = 9
+			mz = 8
 			kind = "secondary"
 		elseif highway == "tertiary" or highway == "tertiary_link" then
-			mz = 10
+			mz = 8
 			kind = "tertiary"
 		elseif highway == "unclassified" or highway == "residential" or highway == "bus_guideway" or highway == "busway" then
-			mz = 12
+			mz = 11
 			kind = highway
 		elseif highway == "living_street" or highway == "pedestrian" or highway == "track" then
 			mz = 13
 			kind = highway
 		elseif highway == "service" then
-			mz = 14
+			mz = 13
 			kind = highway
 		elseif highway == "footway" or highway == "steps" or highway == "path" or highway == "cycleway" then
 			mz = 13
 			kind = highway
 		end
 	end
-	if mz <= 10 then
+	if mz <= 8 then
 		Layer("streets_low", false)
 		MinZoom(mz)
 		Attribute("kind", kind)
 		setZOrder()
 	end
-	if mz <= 13 then
+	if mz <= 12 then
 		Layer("streets_med", false)
 		MinZoom(mz)
 		Attribute("kind", kind)
@@ -320,7 +335,7 @@ function process_pois(polygon)
 	else
 		Layer("pois", false)
 	end
-	MinZoom(14)
+	MinZoom(13)
 	Attribute("tourism", "viewpoint")
 	Attribute("name", fillWithFallback(Find("name"), Find("name:en"), Find("name:de")))
 	return true
