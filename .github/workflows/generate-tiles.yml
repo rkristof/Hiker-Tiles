@@ -210,6 +210,7 @@ jobs:
                   symbol_entries = list(dict.fromkeys(
                       (a['symbol'], a['network']) for a in attr_list if a['symbol']
                   ))
+                  symbol_entries.sort(key=lambda entry: network_rank[entry[1]])
                   base = {
                       'type': primary['type'],
                       'name': primary['name'],
@@ -508,7 +509,7 @@ jobs:
             --named-layer=route_lines:route-lines.geojsonseq
           declare -A symbol_minzoom=(
             [international]=7
-            [national]=9
+            [national]=10
             [regional]=12
             [local]=13
           )
