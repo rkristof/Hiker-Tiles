@@ -81,6 +81,40 @@ jobs:
           import osmium, json, os, math
           import rasterio
 
+          network_group_by_tag = {
+              'iwn': 'international',
+              'icn': 'international',
+              'international': 'international',
+              'int': 'international',
+              'nwn': 'national',
+              'ncn': 'national',
+              'national': 'national',
+              'nat': 'national',
+              'rwn': 'regional',
+              'rcn': 'regional',
+              'regional': 'regional',
+              'reg': 'regional',
+              'lwn': 'local',
+              'lcn': 'local',
+              'local': 'local',
+              'loc': 'local',
+          }
+          network_rank = {
+              'international': 0,
+              'national': 1,
+              'regional': 2,
+              'local': 3,
+          }
+          symbol_networks = ('international', 'national', 'regional', 'local')
+
+          def network_group(network):
+              group = 'local'
+              for network_tag in network.split(';'):
+                  group_candidate = network_group_by_tag.get(network_tag.strip().lower())
+                  if group_candidate and network_rank[group_candidate] < network_rank[group]:
+                      group = group_candidate
+              return group
+
           class WayRouteCollector(osmium.SimpleHandler):
               def __init__(self):
                   super().__init__()
@@ -117,7 +151,7 @@ jobs:
                       'name': tags.get('name', ''),
                       'name_int': tags.get('name:en', '') or tags.get('int_name', ''),
                       'colour': tags.get('colour', ''),
-                      'network': tags.get('network', ''),
+                      'network': network_group(tags.get('network', '')),
                       'symbol': symbol,
                   }
                   self.relations[r.id] = {**attrs, 'way_ids': [m.ref for m in r.members if m.type == 'w']}
@@ -134,7 +168,7 @@ jobs:
                   self.way_count = 0
                   self.point_count = 0
                   self.osmc_symbols = set()  # unique osmc:symbol values seen
-                  self.symbol_groups_buf = []  # buffered (coords, base, symbol_vals)
+                  self.symbol_groups_buf = []  # buffered (coords, base, symbol_entries)
                   self.way_groups_buf = []  # buffered (coords, base), merged into chains after the pass
                   self.way_coords = {}  # way_id -> coords, for route-line stitching
               def node(self, n):
@@ -173,7 +207,9 @@ jobs:
                   if len(coords) < 2: return
                   self.way_coords[w.id] = coords
                   primary = attr_list[0]
-                  symbol_vals = list(dict.fromkeys(a['symbol']         for a in attr_list if a['symbol']))
+                  symbol_entries = list(dict.fromkeys(
+                      (a['symbol'], a['network']) for a in attr_list if a['symbol']
+                  ))
                   base = {
                       'type': primary['type'],
                       'name': primary['name'],
@@ -181,9 +217,9 @@ jobs:
                       'network': primary['network'],
                   }
                   self.way_groups_buf.append((coords, base))
-                  if symbol_vals:
-                      self.osmc_symbols.update(symbol_vals)
-                      self.symbol_groups_buf.append((coords, base, symbol_vals))
+                  if symbol_entries:
+                      self.osmc_symbols.update(symbol for symbol, _ in symbol_entries)
+                      self.symbol_groups_buf.append((coords, base, symbol_entries))
                   self.way_count += 1
 
           collector = WayRouteCollector()
@@ -314,9 +350,12 @@ jobs:
                       previous = current
               return round(gain), round(loss)
                 
+          symbol_files = {
+              network: open(f'hiking-symbols-{network}.geojsonseq', 'w')
+              for network in symbol_networks
+          }
           with open('hiking-ways.geojsonseq', 'w') as wf, \
-               open('natural-points.geojsonseq', 'w') as pf, \
-               open('hiking-symbols.geojsonseq', 'w') as sf:
+               open('natural-points.geojsonseq', 'w') as pf:
               exporter = GeoJSONExporter(collector.way_routes, wf, pf)
               exporter.apply_file(f'tiles-filtered.osm.pbf', locations=True)
               print(f'Route ways matched: {exporter.way_count}')
@@ -351,15 +390,15 @@ jobs:
               # Merge adjacent way-segments sharing an endpoint and identical symbol attributes into longer chains.
               def _merge_symbol_groups(buf):
                   by_key = {}
-                  for coords, base, symbol_vals in buf:
-                      key = (base['type'], base['name'], base['colour'], base['network'], tuple(symbol_vals))
+                  for coords, base, symbol_entries in buf:
+                      key = (base['type'], base['name'], base['colour'], base['network'], tuple(symbol_entries))
                       by_key.setdefault(key, []).append(coords)
                   merged = []
-                  for (rt, name, colour, network, sym_tuple), lines in by_key.items():
+                  for (rt, name, colour, network, entries_tuple), lines in by_key.items():
                       base_d = {'type': rt, 'name': name, 'colour': colour, 'network': network}
-                      sym_list = list(sym_tuple)
+                      symbol_entries = list(entries_tuple)
                       for chain in _chain_lines(lines):
-                          merged.append((chain, base_d, sym_list))
+                          merged.append((chain, base_d, symbol_entries))
                   return merged
               _n_before = len(exporter.symbol_groups_buf)
               exporter.symbol_groups_buf = _merge_symbol_groups(exporter.symbol_groups_buf)
@@ -367,15 +406,17 @@ jobs:
 
               # Write all merged symbol chains — one feature per symbol per chain.
               symbol_point_count = 0
-              for coords, base, symbol_vals in exporter.symbol_groups_buf:
-                  for slot, symbol in enumerate(symbol_vals[:9]):
-                      sf.write(json.dumps({
+              for coords, base, symbol_entries in exporter.symbol_groups_buf:
+                  for slot, (symbol, network) in enumerate(symbol_entries[:9]):
+                      symbol_files[network].write(json.dumps({
                           'type': 'Feature',
                           'geometry': {'type': 'LineString', 'coordinates': coords},
-                          'properties': {**base, 'symbol': symbol, 'slot': slot},
+                          'properties': {**base, 'network': network, 'symbol': symbol, 'slot': slot},
                       }) + '\n')
                       symbol_point_count += 1
               print(f'Symbol lines written: {symbol_point_count} (from {len(exporter.symbol_groups_buf)} merged chains)')
+              for symbol_file in symbol_files.values():
+                  symbol_file.close()
 
           # Build per-relation route-line chains from collected way geometries.
           def _stitch_ways(way_refs, way_coords):
@@ -440,7 +481,9 @@ jobs:
           rm -rf tiles-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
           echo "Hiking ways: $(wc -l < hiking-ways.geojsonseq)"
           echo "Natural points: $(wc -l < natural-points.geojsonseq)"
-          echo "Hiking symbol points: $(wc -l < hiking-symbols.geojsonseq)"
+          for network in international national regional local; do
+              echo "${network} symbol lines: $(wc -l < hiking-symbols-${network}.geojsonseq)"
+          done
           echo "Route lines: $(wc -l < route-lines.geojsonseq)"
           echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
         env:
@@ -452,7 +495,7 @@ jobs:
           tippecanoe \
             --output hiking.mbtiles \
             --minimum-zoom 5 \
-            --maximum-zoom 12 \
+            --maximum-zoom 13 \
             --low-detail 9 \
             --drop-lines \
             --drop-rate 1.3 \
@@ -463,21 +506,39 @@ jobs:
             --named-layer=hiking_routes:hiking-ways.geojsonseq \
             --named-layer=natural_points:natural-points.geojsonseq \
             --named-layer=route_lines:route-lines.geojsonseq
-          tippecanoe \
-            --output hiking-symbols.mbtiles \
-            --minimum-zoom 5 \
-            --maximum-zoom 12 \
-            --low-detail 9 \
-            --drop-lines \
-            --drop-rate 40 \
-            --preserve-point-density-threshold 16 \
-            --single-precision \
-            --drop-densest-as-needed \
-            --force \
-            --named-layer=hiking_symbols:hiking-symbols.geojsonseq
-          tile-join --output ${{ inputs.country }}-hiking.mbtiles hiking.mbtiles hiking-symbols.mbtiles
+          declare -A symbol_minzoom=(
+            [international]=7
+            [national]=9
+            [regional]=12
+            [local]=13
+          )
+          symbol_mbtiles=(hiking.mbtiles)
+          for network in international national regional local; do
+              input="hiking-symbols-${network}.geojsonseq"
+              output="hiking-symbols-${network}.mbtiles"
+              if [[ -s "$input" ]]; then
+                  tippecanoe \
+                      --output "$output" \
+                      --minimum-zoom "${symbol_minzoom[$network]}" \
+                      --maximum-zoom 13 \
+                      --low-detail 9 \
+                      --single-precision \
+                      --drop-densest-as-needed \
+                      --force \
+                      --named-layer="hiking_symbols:${input}"
+                  symbol_mbtiles+=("$output")
+              else
+                  echo "Skipping empty $input"
+              fi
+          done
+          tile-join --output ${{ inputs.country }}-hiking.mbtiles "${symbol_mbtiles[@]}"
           echo "Hiking: $(du -sh ${{ inputs.country }}-hiking.mbtiles | cut -f1)"
-          rm hiking-ways.geojsonseq natural-points.geojsonseq hiking-symbols.geojsonseq route-lines.geojsonseq
+          rm hiking-ways.geojsonseq natural-points.geojsonseq \
+            hiking-symbols-international.geojsonseq \
+            hiking-symbols-national.geojsonseq \
+            hiking-symbols-regional.geojsonseq \
+            hiking-symbols-local.geojsonseq \
+            route-lines.geojsonseq
           cp base.mbtiles ${{ inputs.country }}-base.mbtiles
           echo "Base: $(du -sh ${{ inputs.country }}-base.mbtiles | cut -f1)"
 
