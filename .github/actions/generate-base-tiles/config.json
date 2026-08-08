@@ -76,9 +76,9 @@
         "maxzoom": 13,
         "basezoom": 13,
         "include_ids": false,
-        "name": "Shortbread",
+        "name": "Shortbread base tiles",
         "version": "1.0",
-        "description": "Tile config for a simple vector tiles schema",
+        "description": "Country base tiles using a simple vector tiles schema",
         "compress": "deflate",
         "filemetadata": {
             "tilejson": "2.0.0",

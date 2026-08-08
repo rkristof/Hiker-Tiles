@@ -52,7 +52,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends tippecanoe osmium-tool
+          sudo apt-get install -y --no-install-recommends osmium-tool
           pip3 install osmium rasterio
 
       - name: Generate base map tiles
@@ -365,7 +365,7 @@ jobs:
               print(f'Natural points written: {exporter.point_count}')
 
               # Merge adjacent way-segments sharing an endpoint and identical route attributes into
-              # longer chains, so tippecanoe's --drop-lines decision (which operates per input feature)
+              # longer chains, so low-zoom tile generation works on complete same-route stretches
               # drops or keeps whole unbroken same-route stretches instead of arbitrary OSM way
               # boundaries. This keeps the existing one-relation-per-way dedup (no overlap duplication
               # when routes share a path) while fixing the fragmented look at low zoom.
@@ -495,74 +495,13 @@ jobs:
           ELEVATION_DIRECTORY: elevation-tiles
           SYMBOL_TAG: ${{ inputs.symbol_tag }}
 
-      - name: Generate vector tiles with tippecanoe
+      - name: Generate hiking vector tiles with Tilemaker
         run: |
-          tippecanoe \
-            --output hiking.mbtiles \
-            --minimum-zoom 5 \
-            --maximum-zoom 13 \
-            --low-detail 9 \
-            --drop-lines \
-            --drop-rate 1.3 \
-            --preserve-point-density-threshold 512 \
-            --single-precision \
-            --drop-densest-as-needed \
-            --force \
-            --named-layer=natural_points:natural-points.geojsonseq \
-            --named-layer=route_lines:route-lines.geojsonseq
-          declare -A route_minzoom=(
-            [international]=5
-            [national]=5
-            [regional]=9
-            [local]=11
-          )
-          hiking_mbtiles=(hiking.mbtiles)
-          for network in international national regional local; do
-              input="hiking-routes-${network}.geojsonseq"
-              output="hiking-routes-${network}.mbtiles"
-              if [[ -s "$input" ]]; then
-                  tippecanoe \
-                      --output "$output" \
-                      --minimum-zoom "${route_minzoom[$network]}" \
-                      --maximum-zoom 13 \
-                      --low-detail 9 \
-                      --drop-lines \
-                      --drop-rate 1.3 \
-                      --preserve-point-density-threshold 512 \
-                      --single-precision \
-                      --drop-densest-as-needed \
-                      --force \
-                      --named-layer="hiking_routes:${input}"
-                  hiking_mbtiles+=("$output")
-              else
-                  echo "Skipping empty $input"
-              fi
-          done
-          declare -A symbol_minzoom=(
-            [international]=7
-            [national]=10
-            [regional]=12
-            [local]=13
-          )
-          for network in international national regional local; do
-              input="hiking-symbols-${network}.geojsonseq"
-              output="hiking-symbols-${network}.mbtiles"
-              if [[ -s "$input" ]]; then
-                  tippecanoe \
-                      --output "$output" \
-                      --minimum-zoom "${symbol_minzoom[$network]}" \
-                      --maximum-zoom 13 \
-                      --low-detail 9 \
-                      --single-precision \
-                      --drop-densest-as-needed \
-                      --force \
-                      --named-layer="hiking_symbols:${input}"
-                  hiking_mbtiles+=("$output")
-              else
-                  echo "Skipping empty $input"
-              fi
-          done
-          tile-join --output ${{ inputs.country }}-hiking.mbtiles "${hiking_mbtiles[@]}"
+          tilemaker \
+            --config .github/actions/generate-hiking-tiles/config.json \
+            --process .github/actions/generate-hiking-tiles/process.lua \
+            --bbox -180,-90,180,90 \
+            --output ${{ inputs.country }}-hiking.mbtiles
           echo "Hiking: $(du -sh ${{ inputs.country }}-hiking.mbtiles | cut -f1)"
           rm natural-points.geojsonseq \
             hiking-routes-international.geojsonseq \
