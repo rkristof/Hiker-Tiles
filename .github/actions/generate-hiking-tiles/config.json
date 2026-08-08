@@ -12,8 +12,8 @@
             "maxzoom": 13,
             "source": "route-lines.geojsonseq",
             "source_columns": ["relation_id"],
-            "simplify_below": 13,
-            "simplify_level": 0.00015,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
             "combine_lines_below": 14
         },
         "hiking_routes": {
@@ -21,8 +21,8 @@
             "maxzoom": 13,
             "source": "hiking-routes-international.geojsonseq",
             "source_columns": [],
-            "simplify_below": 13,
-            "simplify_level": 0.00015,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
             "combine_lines_below": 14
         },
         "hiking_routes_national": {
@@ -32,8 +32,8 @@
             "source_columns": [],
             "feature_limit": 300,
             "feature_limit_below": 13,
-            "simplify_below": 13,
-            "simplify_level": 0.00015,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
             "combine_lines_below": 14,
             "write_to": "hiking_routes"
         },
@@ -44,8 +44,8 @@
             "source_columns": [],
             "feature_limit": 200,
             "feature_limit_below": 13,
-            "simplify_below": 13,
-            "simplify_level": 0.00015,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
             "combine_lines_below": 14,
             "write_to": "hiking_routes"
         },
@@ -56,8 +56,8 @@
             "source_columns": [],
             "feature_limit": 100,
             "feature_limit_below": 13,
-            "simplify_below": 13,
-            "simplify_level": 0.00015,
+            "simplify_below": 14,
+            "simplify_level": 0.0001,
             "combine_lines_below": 14,
             "write_to": "hiking_routes"
         },
@@ -66,8 +66,8 @@
             "maxzoom": 13,
             "source": "hiking-symbols-international.geojsonseq",
             "source_columns": ["symbol", "slot"],
-            "simplify_below": 13,
-            "simplify_level": 0.00025,
+            "simplify_below": 14,
+            "simplify_level": 0.0002,
             "combine_lines_below": 14
         },
         "hiking_symbols_national": {
@@ -75,8 +75,8 @@
             "maxzoom": 13,
             "source": "hiking-symbols-national.geojsonseq",
             "source_columns": ["symbol", "slot"],
-            "simplify_below": 13,
-            "simplify_level": 0.00025,
+            "simplify_below": 14,
+            "simplify_level": 0.0002,
             "combine_lines_below": 14,
             "write_to": "hiking_symbols"
         },
@@ -85,8 +85,8 @@
             "maxzoom": 13,
             "source": "hiking-symbols-regional.geojsonseq",
             "source_columns": ["symbol", "slot"],
-            "simplify_below": 13,
-            "simplify_level": 0.00025,
+            "simplify_below": 14,
+            "simplify_level": 0.0002,
             "combine_lines_below": 14,
             "write_to": "hiking_symbols"
         },
@@ -97,8 +97,8 @@
             "source_columns": ["symbol", "slot"],
             "feature_limit": 4,
             "feature_limit_below": 13,
-            "simplify_below": 13,
-            "simplify_level": 0.00025,
+            "simplify_below": 14,
+            "simplify_level": 0.0002,
             "combine_lines_below": 14,
             "write_to": "hiking_symbols"
         }
