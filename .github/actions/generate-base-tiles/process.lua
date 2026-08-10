@@ -7,6 +7,7 @@ end
 node_keys = { "place", "tourism" }
 
 inf_zoom = 99
+max_zoom = 13
 
 -- Geofabrik country IDs whose local place names are commonly written in a
 -- non-Latin script. Used to decide whether to show "Latin\nOriginal" labels.
@@ -56,7 +57,7 @@ function setZOrder()
 	local highway = Find("highway")
 	local layer = tonumber(Find("layer"))
 	local zOrder = 0
-	local Z_STEP = 13
+	local Z_STEP = max_zoom
 	if not (layer == nil) then
 		if layer > 7 then
 			layer = 7
@@ -161,6 +162,10 @@ function zmin_for_area(min_square_pixels, way_area)
 end
 
 function process_water_polygons(way_area)
+	local intermittent = Find("intermittent")
+	if intermittent == "yes" then
+		return
+	end
 	local waterway = Find("waterway")
 	local natural = Find("natural")
 	local water = Find("water")
@@ -168,10 +173,11 @@ function process_water_polygons(way_area)
 	local mz = inf_zoom
 	local kind = ""
 	local is_river = (natural == "water" and water == "river") or waterway == "riverbank"
-	if landuse == "reservoir" or landuse == "basin" or (natural == "water" and not is_river) then
-		mz = math.max(4, zmin_for_area(0.01, way_area))
+	local is_lake = landuse == "reservoir" or landuse == "basin" or (natural == "water" and not is_river)
+	if is_lake then
+		mz = math.max(5, zmin_for_area(1, way_area))
 		if mz >= 10 then
-			mz = math.max(10, zmin_for_area(0.1, way_area))
+			mz = math.max(10, zmin_for_area(10, way_area))
 		end
 		if landuse == "reservoir" or landuse == "basin" then
 			kind = landuse
@@ -179,7 +185,7 @@ function process_water_polygons(way_area)
 			kind = natural
 		end
 	elseif is_river or waterway == "dock" or waterway == "canal" then
-		mz = math.max(4, zmin_for_area(0.1, way_area))
+		mz = math.max(5, zmin_for_area(10, way_area))
 		kind = waterway
 		if is_river then
 			kind = "river"
@@ -190,6 +196,14 @@ function process_water_polygons(way_area)
 		Layer("water_polygons", true)
 		MinZoom(mz)
 		ZOrder(way_area)
+		local name = buildDisplayName()
+		local mz_label = zmin_for_area(250, way_area)
+		if is_lake and name ~= "" and mz_label <= max_zoom then
+			LayerAsCentroid("place_labels", "polylabel")
+			MinZoom(mz_label)
+			Attribute("kind", "water")
+			Attribute("name", name)
+		end
 	end
 end
 
@@ -213,7 +227,7 @@ function process_land()
 		kind = "grass"
 		layer = "natural"
 		mz = 0
-	elseif landuse == "orchard" or landuse == "vineyard" or landuse == "farmyard" or landuse == "greenhouse_horticulture" then
+	elseif landuse == "orchard" or landuse == "vineyard" or landuse == "farmyard" or landuse == "greenhouse_horticulture" or landuse == "allotments" then
 		kind = "farmland"
 		layer = "natural"
 		mz = 0
@@ -249,6 +263,14 @@ function process_land()
 		kind = "marsh"
 		layer = "natural"
 		mz = 8
+	elseif natural == "fell" then
+		kind = "grass"
+		layer = "natural"
+		mz = 8
+	elseif natural == "beach" then
+		kind = "sand"
+		layer = "natural"
+		mz = 8
 	elseif landuse == "cemetery" then
 		kind = "grass"
 		layer = "residential"
@@ -262,6 +284,28 @@ function process_land()
 		Layer(layer, true)
 		MinZoom(mz)
 		Attribute("kind", kind)
+	end
+end
+
+function process_protected_area(way_area)
+	local leisure = Find("leisure")
+	local boundary = Find("boundary")
+	if leisure ~= "nature_reserve" and boundary ~= "national_park" and boundary ~= "protected_area" then
+		return
+	end
+
+	local mz = math.min(max_zoom, math.max(7, zmin_for_area(100, way_area)))
+	Layer("protected_area", true)
+	MinZoom(mz)
+	Attribute("kind", "protected_area")
+
+	local name = fillWithFallback(Find("name"), Find("name:en"), Find("name:de"))
+	local mz_label = zmin_for_area(1000, way_area)
+	if name ~= "" and mz_label <= max_zoom then
+		LayerAsCentroid("place_labels", "polylabel")
+		MinZoom(mz_label)
+		Attribute("kind", "protected_area")
+		Attribute("name", name)
 	end
 end
 
@@ -335,7 +379,7 @@ function process_pois(polygon)
 	else
 		Layer("pois", false)
 	end
-	MinZoom(13)
+	MinZoom(max_zoom)
 	Attribute("tourism", "viewpoint")
 	Attribute("name", fillWithFallback(Find("name"), Find("name:en"), Find("name:de")))
 	return true
@@ -361,6 +405,11 @@ function way_function()
 	-- Layer land
 	if is_area and (Holds("landuse") or Holds("natural") or Holds("wetland") or Holds("leisure")) then
 		process_land()
+	end
+
+	-- Layer protected_area
+	if is_area and (Holds("leisure") or Holds("boundary")) then
+		process_protected_area(area)
 	end
 
 	-- Layer streets

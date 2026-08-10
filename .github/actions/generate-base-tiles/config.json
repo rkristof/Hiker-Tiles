@@ -65,6 +65,17 @@
             "combine_lines_below": 14,
             "write_to": "land"
         },
+        "protected_area": {
+            "minzoom": 7,
+            "maxzoom": 13,
+            "simplify_below": 13,
+            "simplify_level": 0.0003,
+            "simplify_ratio": 1.5,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14
+        },
         "pois": {
             "minzoom": 13,
             "maxzoom": 13,
