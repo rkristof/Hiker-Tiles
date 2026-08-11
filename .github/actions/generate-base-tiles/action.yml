@@ -20,7 +20,37 @@ runs:
           libboost-program-options-dev \
           libboost-system-dev \
           libshp-dev \
-          libsqlite3-dev
+          libsqlite3-dev \
+          libsqlite3-mod-spatialite \
+          gdal-bin \
+          libgdal-dev \
+          osmium-tool \
+          python3-pip \
+          python3-dev
+
+    - name: Install GeoFileOps
+      shell: bash
+      run: |
+        GDAL_VERSION="$(gdal-config --version)"
+        pip3 install \
+          --user \
+          --break-system-packages \
+          --disable-pip-version-check \
+          "GDAL==${GDAL_VERSION}" \
+          "numpy<2" \
+          geofileops==0.11.4
+
+    - name: Preprocess natural polygons
+      shell: bash
+      run: |
+        python3 \
+          .github/actions/generate-base-tiles/preprocess_natural.py \
+          --input tiles-latest.osm.pbf \
+          --output natural-low.geojsonseq \
+          --nb-squarish-tiles 128 \
+          --nb-parallel "$(getconf _NPROCESSORS_ONLN)" \
+          --gridsize-meters 300 \
+          --min-area-m2 250000
 
     - name: Download Tilemaker binary
       shell: bash
@@ -45,4 +75,5 @@ runs:
         --process .github/actions/generate-base-tiles/process.lua \
         --bbox -180,-90,180,90 \
         --input tiles-latest.osm.pbf \
-        --output base.mbtiles
+        --output base.mbtiles \
+        --threads "$(getconf _NPROCESSORS_ONLN)"

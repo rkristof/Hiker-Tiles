@@ -218,34 +218,22 @@ function process_land()
 	if landuse == "forest" or landuse == "grass" or landuse == "farmland" then
 		kind = landuse
 		layer = "natural"
-		mz = 0
+		mz = 8
 	elseif natural == "wood" then
 		kind = "forest"
 		layer = "natural"
-		mz = 0
+		mz = 8
 	elseif natural == "grassland" or landuse == "meadow" then
 		kind = "grass"
 		layer = "natural"
-		mz = 0
+		mz = 8
 	elseif landuse == "orchard" or landuse == "vineyard" or landuse == "farmyard" or landuse == "greenhouse_horticulture" or landuse == "allotments" then
 		kind = "farmland"
 		layer = "natural"
-		mz = 0
+		mz = 8
 	elseif natural == "glacier" or natural == "bare_rock" then
 		kind = natural
 		layer = "natural"
-		mz = 0
-	elseif landuse == "residential" or landuse == "industrial" then
-		kind = landuse
-		layer = "residential"
-		mz = 8
-	elseif landuse == "commercial" then
-		kind = "residential"
-		layer = "residential"
-		mz = 8
-	elseif landuse == "construction" then
-		kind = "residential"
-		layer = "residential"
 		mz = 8
 	elseif landuse == "quarry" then
 		kind = landuse
@@ -270,6 +258,18 @@ function process_land()
 	elseif natural == "beach" then
 		kind = "sand"
 		layer = "natural"
+		mz = 8
+	elseif landuse == "residential" or landuse == "industrial" then
+		kind = landuse
+		layer = "residential"
+		mz = 8
+	elseif landuse == "commercial" then
+		kind = "residential"
+		layer = "residential"
+		mz = 8
+	elseif landuse == "construction" then
+		kind = "residential"
+		layer = "residential"
 		mz = 8
 	elseif landuse == "cemetery" then
 		kind = "grass"

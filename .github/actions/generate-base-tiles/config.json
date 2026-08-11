@@ -53,8 +53,21 @@
             "combine_lines_below": 14,
             "write_to": "land"
         },
-        "natural": {
+        "natural_low": {
             "minzoom": 0,
+            "maxzoom": 7,
+            "source": "natural-low.geojsonseq",
+            "source_columns": ["kind"],
+            "simplify_below": 13,
+            "simplify_level": 0.00001,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14,
+            "write_to": "land"
+        },
+        "natural": {
+            "minzoom": 8,
             "maxzoom": 13,
             "simplify_below": 13,
             "simplify_level": 0.0003,
