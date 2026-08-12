@@ -52,7 +52,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends tippecanoe osmium-tool
+          sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g
           pip3 install osmium rasterio
 
       - name: Generate base map tiles
@@ -106,6 +106,91 @@ jobs:
               'local': 3,
           }
           network_groups = ('international', 'national', 'regional', 'local')
+          route_minzoom = {
+              'international': 5,
+              'national': 5,
+              'regional': 8,
+              'local': 10,
+          }
+          symbol_minzoom = {
+              'international': 7,
+              'national': 10,
+              'regional': 12,
+              'local': 13,
+          }
+
+          def make_itinerary(tags):
+              itinerary = []
+              from_name = tags.get('from')
+              if from_name is not None:
+                  itinerary.append(from_name)
+
+              via = tags.get('via')
+              if via is not None:
+                  if ';' in via:
+                      itinerary.extend(value.strip() for value in via.split(';'))
+                  elif ' - ' in via:
+                      itinerary.extend(value.strip() for value in via.split(' - '))
+                  else:
+                      itinerary.extend(value.strip() for value in via.split(','))
+
+              to_name = tags.get('to')
+              if to_name is not None:
+                  itinerary.append(to_name)
+              return itinerary
+
+          def make_route_title(tags, relation_id):
+              name = tags.get('name', '')
+              if name:
+                  return name
+
+              itinerary = make_itinerary(tags)
+              if itinerary:
+                  return ' - '.join(itinerary)
+
+              symbol_description = tags.get('symbol', '')
+              if symbol_description:
+                  return symbol_description
+
+              ref = tags.get('ref', '')
+              if ref:
+                  return f'[{ref}]'
+
+              return f'({relation_id})'
+
+          def route_difficulty(country, tags):
+              """Return normalized difficulty class, or None for standard routes."""
+              if tags.get('route') not in ('hiking', 'foot'):
+                  return None
+
+              network = tags.get('network', '').strip().lower()
+              symbol = tags.get('osmc:symbol', '').strip().lower()
+
+              if country == 'switzerland' and network == 'lwn':
+                  if symbol.startswith('red:white:red_bar'):
+                      return 2
+                  if symbol.startswith('blue:white:blue_bar'):
+                      return 3
+
+              if country == 'austria':
+                  if (
+                      tags.get('operator', '').strip().lower() == 'land vorarlberg'
+                      and network == 'rwn'
+                      and tags.get('network:type', '').strip().lower() == 'basic_network'
+                  ):
+                      if symbol.startswith('red:white:red_bar'):
+                          return 2
+                      if symbol.startswith('blue:white:blue_bar'):
+                          return 3
+
+              if country == 'italy' and network == 'lwn' and symbol.startswith('red:'):
+                  return {
+                      'E': 1,
+                      'EE': 2,
+                      'EEA*': 3,
+                  }.get(tags.get('cai_scale', '').strip().upper())
+
+              return None
 
           def network_group(network):
               group = 'local'
@@ -148,11 +233,12 @@ jobs:
                       symbol = tags.get(symbol_tag, '')
                   attrs = {
                       'type': rt,
-                      'name': tags.get('name', ''),
+                      'name': make_route_title(tags, r.id),
                       'name_int': tags.get('name:en', '') or tags.get('int_name', ''),
                       'colour': tags.get('colour', ''),
                       'network': network_group(tags.get('network', '')),
                       'symbol': symbol,
+                      'difficulty': route_difficulty(os.environ['COUNTRY'], tags),
                   }
                   self.relations[r.id] = {**attrs, 'way_ids': [m.ref for m in r.members if m.type == 'w']}
                   for m in r.members:
@@ -206,6 +292,7 @@ jobs:
                   if len(coords) < 2: return
                   self.way_coords[w.id] = coords
                   primary = min(attr_list, key=lambda attrs: network_rank[attrs['network']])
+                  difficulty = max((attrs['difficulty'] or 0 for attrs in attr_list), default=0)
                   symbol_entries = list(dict.fromkeys(
                       (a['symbol'], a['network']) for a in attr_list if a['symbol']
                   ))
@@ -216,6 +303,8 @@ jobs:
                       'colour': primary['colour'],
                       'network': primary['network'],
                   }
+                  if difficulty:
+                      base['difficulty'] = difficulty
                   self.way_groups_buf.append((coords, base))
                   if symbol_entries:
                       self.osmc_symbols.update(symbol for symbol, _ in symbol_entries)
@@ -350,14 +439,8 @@ jobs:
                       previous = current
               return round(gain), round(loss)
                 
-          route_files = {
-              network: open(f'hiking-routes-{network}.geojsonseq', 'w')
-              for network in network_groups
-          }
-          symbol_files = {
-              network: open(f'hiking-symbols-{network}.geojsonseq', 'w')
-              for network in network_groups
-          }
+          route_file = open('hiking-routes.geojsonseq', 'w')
+          symbol_file = open('hiking-symbols.geojsonseq', 'w')
           with open('natural-points.geojsonseq', 'w') as pf:
               exporter = GeoJSONExporter(collector.way_routes, pf)
               exporter.apply_file(f'tiles-filtered.osm.pbf', locations=True)
@@ -372,11 +455,13 @@ jobs:
               def _merge_way_groups(buf):
                   by_key = {}
                   for coords, base in buf:
-                      key = (base['type'], base['name'], base['colour'], base['network'])
+                      key = (base['type'], base['name'], base['colour'], base['network'], base.get('difficulty', 0))
                       by_key.setdefault(key, []).append(coords)
                   merged = []
-                  for (rt, name, colour, network), lines in by_key.items():
+                  for (rt, name, colour, network, difficulty), lines in by_key.items():
                       base_d = {'type': rt, 'name': name, 'colour': colour, 'network': network}
+                      if difficulty:
+                          base_d['difficulty'] = difficulty
                       for chain in _chain_lines(lines):
                           merged.append((chain, base_d))
                   return merged
@@ -384,8 +469,9 @@ jobs:
               merged_ways = _merge_way_groups(exporter.way_groups_buf)
               print(f'Way segments merged: {_n_ways_before} -> {len(merged_ways)} chains')
               for coords, base in merged_ways:
-                  route_files[base['network']].write(json.dumps({
+                  route_file.write(json.dumps({
                       'type': 'Feature',
+                      'tippecanoe': {'minzoom': route_minzoom[base['network']], 'maxzoom': 13},
                       'geometry': {'type': 'LineString', 'coordinates': coords},
                       'properties': base,
                   }) + '\n')
@@ -411,17 +497,16 @@ jobs:
               symbol_point_count = 0
               for coords, base, symbol_entries in exporter.symbol_groups_buf:
                   for slot, (symbol, network) in enumerate(symbol_entries[:9]):
-                      symbol_files[network].write(json.dumps({
+                      symbol_file.write(json.dumps({
                           'type': 'Feature',
+                          'tippecanoe': {'minzoom': symbol_minzoom[network], 'maxzoom': 13},
                           'geometry': {'type': 'LineString', 'coordinates': coords},
                           'properties': {**base, 'network': network, 'symbol': symbol, 'slot': slot},
                       }) + '\n')
                       symbol_point_count += 1
               print(f'Symbol lines written: {symbol_point_count} (from {len(exporter.symbol_groups_buf)} merged chains)')
-              for symbol_file in symbol_files.values():
-                  symbol_file.close()
-              for route_file in route_files.values():
-                  route_file.close()
+              symbol_file.close()
+              route_file.close()
 
           # Build per-relation route-line chains from collected way geometries.
           def _stitch_ways(way_refs, way_coords):
@@ -485,15 +570,28 @@ jobs:
           PYEOF
           rm -rf tiles-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
           echo "Natural points: $(wc -l < natural-points.geojsonseq)"
-          for network in international national regional local; do
-              echo "${network} route lines: $(wc -l < hiking-routes-${network}.geojsonseq)"
-              echo "${network} symbol lines: $(wc -l < hiking-symbols-${network}.geojsonseq)"
-          done
+          echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
+          echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"
           echo "Route lines: $(wc -l < route-lines.geojsonseq)"
           echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
         env:
           ELEVATION_DIRECTORY: elevation-tiles
+          COUNTRY: ${{ inputs.country }}
           SYMBOL_TAG: ${{ inputs.symbol_tag }}
+
+      - name: Download Tippecanoe binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download tippecanoe-latest \
+            --repo ${{ github.repository }} \
+            --pattern 'tippecanoe-linux-amd64.tar.gz' \
+            --output tippecanoe.tar.gz
+          tar -xzf tippecanoe.tar.gz
+          sudo install -m 0755 tippecanoe /usr/local/bin/tippecanoe
+          rm tippecanoe tippecanoe.tar.gz
+          tippecanoe --version
 
       - name: Generate vector tiles with Tippecanoe
         run: |
@@ -503,79 +601,21 @@ jobs:
             --maximum-zoom 13 \
             --low-detail 9 \
             --simplification 0.5 \
+            --reorder \
+            --hilbert \
+            --coalesce \
             --single-precision \
-            --drop-densest-as-needed \
+            --no-tile-size-limit \
             --force \
             --named-layer=natural_points:natural-points.geojsonseq \
-            --named-layer=route_lines:route-lines.geojsonseq
-          declare -A route_minzoom=(
-            [international]=5
-            [national]=5
-            [regional]=8
-            [local]=10
-          )
-          hiking_mbtiles=(hiking.mbtiles)
-          for network in international national regional local; do
-              input="hiking-routes-${network}.geojsonseq"
-              output="hiking-routes-${network}.mbtiles"
-              if [[ -s "$input" ]]; then
-                  tippecanoe \
-                      --output "$output" \
-                      --minimum-zoom "${route_minzoom[$network]}" \
-                      --maximum-zoom 13 \
-                      --low-detail 9 \
-                      --simplification 0.5 \
-                      --reorder \
-                      --hilbert \
-                      --coalesce \
-                      --single-precision \
-                      --drop-densest-as-needed \
-                      --force \
-                      --named-layer="hiking_routes:${input}"
-                  hiking_mbtiles+=("$output")
-              else
-                  echo "Skipping empty $input"
-              fi
-          done
-          declare -A symbol_minzoom=(
-            [international]=7
-            [national]=10
-            [regional]=12
-            [local]=13
-          )
-          for network in international national regional local; do
-              input="hiking-symbols-${network}.geojsonseq"
-              output="hiking-symbols-${network}.mbtiles"
-              if [[ -s "$input" ]]; then
-                  tippecanoe \
-                      --output "$output" \
-                      --minimum-zoom "${symbol_minzoom[$network]}" \
-                      --maximum-zoom 13 \
-                      --low-detail 9 \
-                      --simplification 0.5 \
-                      --reorder \
-                      --hilbert \
-                      --coalesce \
-                      --single-precision \
-                      --drop-densest-as-needed \
-                      --force \
-                      --named-layer="hiking_symbols:${input}"
-                  hiking_mbtiles+=("$output")
-              else
-                  echo "Skipping empty $input"
-              fi
-          done
-          tile-join --output ${{ inputs.country }}-hiking.mbtiles "${hiking_mbtiles[@]}"
+            --named-layer=route_lines:route-lines.geojsonseq \
+            --named-layer=hiking_routes:hiking-routes.geojsonseq \
+            --named-layer=hiking_symbols:hiking-symbols.geojsonseq
+          mv hiking.mbtiles ${{ inputs.country }}-hiking.mbtiles
           echo "Hiking: $(du -sh ${{ inputs.country }}-hiking.mbtiles | cut -f1)"
           rm natural-points.geojsonseq \
-            hiking-routes-international.geojsonseq \
-            hiking-routes-national.geojsonseq \
-            hiking-routes-regional.geojsonseq \
-            hiking-routes-local.geojsonseq \
-            hiking-symbols-international.geojsonseq \
-            hiking-symbols-national.geojsonseq \
-            hiking-symbols-regional.geojsonseq \
-            hiking-symbols-local.geojsonseq \
+            hiking-routes.geojsonseq \
+            hiking-symbols.geojsonseq \
             route-lines.geojsonseq
           cp base.mbtiles ${{ inputs.country }}-base.mbtiles
           echo "Base: $(du -sh ${{ inputs.country }}-base.mbtiles | cut -f1)"
