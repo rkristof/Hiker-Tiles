@@ -8,8 +8,12 @@ permissions:
 
 jobs:
   generate:
-    uses: ./.github/workflows/generate-tiles.yml
-    with:
-      country: slovakia
-      symbol_tag: kct
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate and publish country tiles
+        uses: ./.github/actions/generate-country-tiles
+        with:
+          country: slovakia
+          symbol_tag: kct
