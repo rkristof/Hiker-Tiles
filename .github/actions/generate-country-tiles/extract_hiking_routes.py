@@ -31,6 +31,25 @@ NETWORK_RANK = {
     'local': 3,
 }
 ROUTE_TYPES = ('hiking', 'foot', 'mtb')
+PROPOSED_STATES = frozenset(('planned', 'proposed'))
+INACTIVE_STATES = frozenset((
+    'abandoned',
+    'cancelled',
+    'demolished',
+    'destroyed',
+    'disused',
+    'inactive',
+    'obsolete',
+    'razed',
+    'removed',
+))
+INACTIVE_ROUTE_TAGS = (
+    'abandoned:route',
+    'demolished:route',
+    'destroyed:route',
+    'disused:route',
+    'razed:route',
+)
 ROUTE_MINZOOM = {
     'international': 5,
     'national': 5,
@@ -74,6 +93,8 @@ class WayRouteCollector(osmium.SimpleHandler):
             return
         route_type = tags.get('route', '')
         if route_type not in ROUTE_TYPES:
+            return
+        if self.is_lifecycle_excluded(tags):
             return
         # Keep relation attributes on each member way; way export later combines
         # attributes when a way belongs to multiple route relations.
@@ -190,6 +211,30 @@ class WayRouteCollector(osmium.SimpleHandler):
                 return f'kct_{colour}:{symbol}'
 
         return tags.get('osmc:symbol', '')
+
+    @staticmethod
+    def is_lifecycle_excluded(tags):
+        """Return whether lifecycle tags exclude a route relation."""
+        state = tags.get('state', '').strip().lower()
+        if state in PROPOSED_STATES:
+            return True
+        if state in INACTIVE_STATES:
+            return True
+
+        for status_key in ('status', 'route:status'):
+            status = tags.get(status_key, '').strip().lower()
+            if status in PROPOSED_STATES or status in INACTIVE_STATES:
+                return True
+
+        proposed_type = tags.get('proposed:type', '').strip().lower()
+        if proposed_type == 'route':
+            return True
+
+        for tag_key in INACTIVE_ROUTE_TAGS:
+            if tags.get(tag_key, '').strip():
+                return True
+
+        return False
 
 
 class GeoJSONExporter(osmium.SimpleHandler):
