@@ -39,8 +39,8 @@ ROUTE_MINZOOM = {
 }
 SYMBOL_MINZOOM = {
     'international': 7,
-    'national': 10,
-    'regional': 12,
+    'national': 9,
+    'regional': 11,
     'local': 13,
 }
 
