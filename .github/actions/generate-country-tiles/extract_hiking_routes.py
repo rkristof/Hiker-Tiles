@@ -74,8 +74,8 @@ def write_feature(output, geometry, properties, minzoom=None):
     output.write(json.dumps(feature) + '\n')
 
 
-def build_route_properties(route_type, name, colour, network, difficulty=0):
-    route_properties = {'type': route_type, 'name': name, 'colour': colour, 'network': network}
+def build_route_properties(route_type, name, network, difficulty=0):
+    route_properties = {'type': route_type, 'name': name, 'network': network}
     if difficulty:
         route_properties['difficulty'] = difficulty
     return route_properties
@@ -102,7 +102,6 @@ class WayRouteCollector(osmium.SimpleHandler):
             'type': route_type,
             'name': self._make_route_title(tags, relation.id),
             'name_int': tags.get('name:en', '') or tags.get('int_name', ''),
-            'colour': tags.get('colour', ''),
             'network': self._network_group(tags.get('network', '')),
             'symbol': self._route_symbol(tags, os.environ['SYMBOL_TAG']),
             'difficulty': self._route_difficulty(os.environ['COUNTRY'], tags),
@@ -284,13 +283,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         # Symbol entries stay in network order because their index becomes the
         # rendered symbol slot in the separate symbol layer.
         symbol_entries.sort(key=lambda entry: NETWORK_RANK[entry[1]])
-        route_properties = build_route_properties(
-            primary_route['type'],
-            primary_route['name'],
-            primary_route['colour'],
-            primary_route['network'],
-            difficulty,
-        )
+        route_properties = build_route_properties(primary_route['type'], primary_route['name'], primary_route['network'], difficulty)
         self.way_groups_buffer.append((coordinates, route_properties))
         if symbol_entries:
             self.route_symbols.update(symbol for symbol, _ in symbol_entries)
@@ -467,15 +460,14 @@ def merge_way_groups(way_groups):
         group_key = (
             route_properties['type'],
             route_properties['name'],
-            route_properties['colour'],
             route_properties['network'],
             route_properties.get('difficulty', 0),
         )
         groups_by_key.setdefault(group_key, []).append(coordinates)
 
     merged_groups = []
-    for (route_type, name, colour, network, difficulty), line_segments in groups_by_key.items():
-        route_properties = build_route_properties(route_type, name, colour, network, difficulty)
+    for (route_type, name, network, difficulty), line_segments in groups_by_key.items():
+        route_properties = build_route_properties(route_type, name, network, difficulty)
         for chain in chain_lines(line_segments):
             merged_groups.append((chain, route_properties))
     return merged_groups
@@ -484,18 +476,12 @@ def merge_way_groups(way_groups):
 def merge_symbol_groups(symbol_groups):
     groups_by_key = {}
     for coordinates, route_properties, symbol_entries in symbol_groups:
-        group_key = (
-            route_properties['type'],
-            route_properties['name'],
-            route_properties['colour'],
-            route_properties['network'],
-            tuple(symbol_entries),
-        )
+        group_key = (route_properties['type'], route_properties['name'], route_properties['network'], tuple(symbol_entries))
         groups_by_key.setdefault(group_key, []).append(coordinates)
 
     merged_groups = []
-    for (route_type, name, colour, network, symbol_entries_tuple), line_segments in groups_by_key.items():
-        route_properties = build_route_properties(route_type, name, colour, network)
+    for (route_type, name, network, symbol_entries_tuple), line_segments in groups_by_key.items():
+        route_properties = build_route_properties(route_type, name, network)
         symbol_entries = list(symbol_entries_tuple)
         for chain in chain_lines(line_segments):
             merged_groups.append((chain, route_properties, symbol_entries))
@@ -576,7 +562,6 @@ def write_route_lines(collector, exporter):
                     'name': route_relation['name'],
                     'name_int': route_relation.get('name_int', ''),
                     'symbol': route_relation['symbol'],
-                    'colour': route_relation['colour'],
                     'network': route_relation['network'],
                     'type': route_relation['type'],
                     'min_lon': min(point[0] for point in all_coordinates),
@@ -592,7 +577,6 @@ def write_route_lines(collector, exporter):
                     'relation_id': relation_id,
                     'name': route_relation['name'],
                     'symbol': route_relation['symbol'],
-                    'colour': route_relation['colour'],
                     'network': route_relation['network'],
                     'route_type': route_relation['type'],
                 }
