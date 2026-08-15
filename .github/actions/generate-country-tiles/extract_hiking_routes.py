@@ -7,28 +7,16 @@ import rasterio
 
 
 NETWORK_GROUP_BY_TAG = {
-    'iwn': 'international',
-    'icn': 'international',
-    'international': 'international',
-    'int': 'international',
-    'nwn': 'national',
-    'ncn': 'national',
-    'national': 'national',
-    'nat': 'national',
-    'rwn': 'regional',
-    'rcn': 'regional',
-    'regional': 'regional',
-    'reg': 'regional',
-    'lwn': 'local',
-    'lcn': 'local',
-    'local': 'local',
-    'loc': 'local',
+    'iwn': 'iwn', 'icn': 'iwn', 'international': 'iwn', 'int': 'iwn',
+    'nwn': 'nwn', 'ncn': 'nwn', 'national': 'nwn', 'nat': 'nwn',
+    'rwn': 'rwn', 'rcn': 'rwn', 'regional': 'rwn', 'reg': 'rwn',
+    'lwn': 'lwn', 'lcn': 'lwn', 'local': 'lwn', 'loc': 'lwn',
 }
 NETWORK_RANK = {
-    'international': 0,
-    'national': 1,
-    'regional': 2,
-    'local': 3,
+    'iwn': 0,
+    'nwn': 1,
+    'rwn': 2,
+    'lwn': 3,
 }
 ROUTE_TYPES = ('hiking', 'foot', 'mtb')
 PROPOSED_STATES = frozenset(('planned', 'proposed'))
@@ -51,16 +39,16 @@ INACTIVE_ROUTE_TAGS = (
     'razed:route',
 )
 ROUTE_MINZOOM = {
-    'international': 5,
-    'national': 5,
-    'regional': 8,
-    'local': 10,
+    'iwn': 5,
+    'nwn': 5,
+    'rwn': 8,
+    'lwn': 10,
 }
 SYMBOL_MINZOOM = {
-    'international': 7,
-    'national': 9,
-    'regional': 11,
-    'local': 13,
+    'iwn': 7,
+    'nwn': 9,
+    'rwn': 11,
+    'lwn': 13,
 }
 
 
@@ -187,7 +175,7 @@ class WayRouteCollector(osmium.SimpleHandler):
     @staticmethod
     def _network_group(network):
         """Return highest-priority network represented by semicolon-separated tags."""
-        group = 'local'
+        group = 'lwn'
         for network_tag in network.split(';'):
             group_candidate = NETWORK_GROUP_BY_TAG.get(network_tag.strip().lower())
             if group_candidate and NETWORK_RANK[group_candidate] < NETWORK_RANK[group]:
@@ -457,12 +445,7 @@ def route_elevation_change(chains, sampler):
 def merge_way_groups(way_groups):
     groups_by_key = {}
     for coordinates, route_properties in way_groups:
-        group_key = (
-            route_properties['type'],
-            route_properties['name'],
-            route_properties['network'],
-            route_properties.get('difficulty', 0),
-        )
+        group_key = (route_properties['type'], route_properties['name'], route_properties['network'], route_properties.get('difficulty', 0))
         groups_by_key.setdefault(group_key, []).append(coordinates)
 
     merged_groups = []

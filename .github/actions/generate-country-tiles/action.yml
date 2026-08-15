@@ -165,7 +165,7 @@ runs:
                 id, name, name_int, symbol, network, route_type,
                 min_lon, min_lat, max_lon, max_lat, distance_m,
                 elevation_gain_m, elevation_loss_m, duration_min
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''',
             [(r['id'], r['name'], r['name_int'], r['symbol'], r['network'], r['type'],
               r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
