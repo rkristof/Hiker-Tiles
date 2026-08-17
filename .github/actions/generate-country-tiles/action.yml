@@ -156,6 +156,7 @@ runs:
                 distance_m INTEGER,
                 elevation_gain_m INTEGER,
                 elevation_loss_m INTEGER,
+                elevation_profile TEXT NOT NULL DEFAULT '[]',
                 duration_min INTEGER
             )
         ''')
@@ -164,12 +165,14 @@ runs:
             INSERT OR REPLACE INTO routes (
                 id, name, name_int, symbol, network, route_type,
                 min_lon, min_lat, max_lon, max_lat, distance_m,
-                elevation_gain_m, elevation_loss_m, duration_min
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                elevation_gain_m, elevation_loss_m, elevation_profile, duration_min
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''',
             [(r['id'], r['name'], r['name_int'], r['symbol'], r['network'], r['type'],
               r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
-              r['elevation_gain_m'], r['elevation_loss_m'], r['duration_min'])
+              r['elevation_gain_m'], r['elevation_loss_m'],
+              json.dumps(r['elevation_profile'], separators=(',', ':')),
+              r['duration_min'])
              for r in routes]
         )
         conn.commit()
