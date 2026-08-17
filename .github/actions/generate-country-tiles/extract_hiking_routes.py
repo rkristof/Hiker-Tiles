@@ -44,7 +44,8 @@ ROUTE_MINZOOM = {
     'rwn': 8,
     'lwn': 10,
 }
-ELEVATION_PROFILE_MAX_POINTS = 256
+ELEVATION_PROFILE_MAX_DISTANCE_M = 25_000
+ELEVATION_PROFILE_SAMPLE_INTERVAL_M = 40
 SYMBOL_MINZOOM = {
     'iwn': 7,
     'nwn': 9,
@@ -366,67 +367,44 @@ def route_distance_m(chains):
     return round(total_distance_m)
 
 
-def downsample_profile_segment(points, target_count):
-    if len(points) <= target_count:
-        return points
+def interpolate_point(first_point, second_point, fraction):
     return [
-        points[round(index * (len(points) - 1) / (target_count - 1))]
-        for index in range(target_count)
+        first_point[0] + (second_point[0] - first_point[0]) * fraction,
+        first_point[1] + (second_point[1] - first_point[1]) * fraction,
     ]
 
 
-def downsample_elevation_profile(segments, max_points):
-    total_points = sum(len(segment) for segment in segments)
-    if total_points <= max_points:
-        return segments
+def sample_chain_points(chain, interval_m):
+    """Return route coordinates sampled at fixed distances plus the endpoint."""
+    if len(chain) < 2:
+        return []
 
-    ranked_segments = sorted(enumerate(segments), key=lambda item: len(item[1]), reverse=True)
-    max_segments = max_points // 2
-    if len(ranked_segments) > max_segments:
-        selected_indexes = sorted(index for index, _ in ranked_segments[:max_segments])
-        segments = [segments[index] for index in selected_indexes]
+    samples = [(0.0, chain[0])]
+    chain_distance = 0.0
+    next_sample_distance = interval_m
+    previous_point = chain[0]
+    for current_point in chain[1:]:
+        segment_distance = haversine_distance_m(previous_point, current_point)
+        segment_end_distance = chain_distance + segment_distance
+        while next_sample_distance < segment_end_distance:
+            fraction = (next_sample_distance - chain_distance) / segment_distance
+            samples.append((next_sample_distance, interpolate_point(previous_point, current_point, fraction)))
+            next_sample_distance += interval_m
+        chain_distance = segment_end_distance
+        previous_point = current_point
 
-    total_points = sum(len(segment) for segment in segments)
-    target_counts = [
-        max(2, round(max_points * len(segment) / total_points))
-        for segment in segments
-    ]
-    while sum(target_counts) > max_points:
-        largest_segment = max(
-            (index for index, count in enumerate(target_counts) if count > 2),
-            key=lambda index: target_counts[index],
-            default=None,
-        )
-        if largest_segment is None:
-            break
-        target_counts[largest_segment] -= 1
-    while sum(target_counts) < max_points:
-        largest_segment = max(
-            range(len(segments)),
-            key=lambda index: len(segments[index]) - target_counts[index],
-            default=None,
-        )
-        if largest_segment is None or target_counts[largest_segment] >= len(segments[largest_segment]):
-            break
-        target_counts[largest_segment] += 1
-
-    return [
-        downsample_profile_segment(segment, target_count)
-        for segment, target_count in zip(segments, target_counts)
-    ]
+    if samples[-1][0] < chain_distance:
+        samples.append((chain_distance, chain[-1]))
+    return samples
 
 
 def route_elevation_profile(chains, sampler):
     profile_segments = []
     route_distance = 0.0
     for chain in chains:
-        chain_distance = 0.0
-        previous_point = None
         current_segment = []
-        for point in chain:
-            if previous_point is not None:
-                chain_distance += haversine_distance_m(previous_point, point)
-
+        sampled_points = sample_chain_points(chain, ELEVATION_PROFILE_SAMPLE_INTERVAL_M)
+        for chain_distance, point in sampled_points:
             elevation = sampler.sample(point)
             if elevation is None:
                 if len(current_segment) >= 2:
@@ -437,14 +415,13 @@ def route_elevation_profile(chains, sampler):
                     round(route_distance + chain_distance),
                     round(elevation),
                 ])
-            previous_point = point
 
         if len(current_segment) >= 2:
             profile_segments.append(current_segment)
-        route_distance += chain_distance
+        route_distance += route_distance_m([chain])
 
     return {
-        'segments': downsample_elevation_profile(profile_segments, ELEVATION_PROFILE_MAX_POINTS),
+        'segments': profile_segments,
     }
 
 
@@ -622,8 +599,12 @@ def write_route_lines(collector, exporter):
                     continue
                 all_coordinates = [point for chain in chains for point in chain]
                 elevation_gain_m, elevation_loss_m = route_elevation_change(chains, elevation_sampler)
-                elevation_profile = route_elevation_profile(chains, elevation_sampler)
                 distance_m = route_distance_m(chains)
+                elevation_profile = (
+                    route_elevation_profile(chains, elevation_sampler)
+                    if distance_m <= ELEVATION_PROFILE_MAX_DISTANCE_M
+                    else {'segments': []}
+                )
                 duration_min = route_duration_min(distance_m, elevation_gain_m, elevation_loss_m)
                 route_metadata.append({
                     'id': relation_id,
