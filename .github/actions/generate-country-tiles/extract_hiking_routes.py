@@ -386,15 +386,13 @@ def sample_chain_points(chain, interval_m):
     for current_point in chain[1:]:
         segment_distance = haversine_distance_m(previous_point, current_point)
         segment_end_distance = chain_distance + segment_distance
-        while next_sample_distance < segment_end_distance:
+        while next_sample_distance <= segment_end_distance:
             fraction = (next_sample_distance - chain_distance) / segment_distance
             samples.append((next_sample_distance, interpolate_point(previous_point, current_point, fraction)))
             next_sample_distance += interval_m
         chain_distance = segment_end_distance
         previous_point = current_point
 
-    if samples[-1][0] < chain_distance:
-        samples.append((chain_distance, chain[-1]))
     return samples
 
 
@@ -403,26 +401,31 @@ def route_elevation_profile(chains, sampler):
     route_distance = 0.0
     for chain in chains:
         current_segment = []
+        current_segment_start = None
         sampled_points = sample_chain_points(chain, ELEVATION_PROFILE_SAMPLE_INTERVAL_M)
         for chain_distance, point in sampled_points:
             elevation = sampler.sample(point)
             if elevation is None:
                 if len(current_segment) >= 2:
-                    profile_segments.append(current_segment)
+                    profile_segments.append({
+                        'start_distance_m': current_segment_start,
+                        'elevations': current_segment,
+                    })
                 current_segment = []
+                current_segment_start = None
             else:
-                current_segment.append([
-                    round(route_distance + chain_distance),
-                    round(elevation),
-                ])
+                if current_segment_start is None:
+                    current_segment_start = round(route_distance + chain_distance)
+                current_segment.append(round(elevation))
 
         if len(current_segment) >= 2:
-            profile_segments.append(current_segment)
+            profile_segments.append({
+                'start_distance_m': current_segment_start,
+                'elevations': current_segment,
+            })
         route_distance += route_distance_m([chain])
 
-    return {
-        'segments': profile_segments,
-    }
+    return {'segments': profile_segments}
 
 
 class ElevationSampler:
