@@ -246,6 +246,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.symbol_groups_buffer = []  # buffered (coordinates, route_properties, symbol_entries)
         self.way_groups_buffer = []  # buffered (coordinates, route_properties), merged after the pass
         self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
+        self.node_way_ids = {}  # node_id -> route way IDs, shared across relations
         self.node_coordinates = {}  # node_id -> coordinates for relation endpoint markers
 
     def node(self, node):
@@ -276,6 +277,8 @@ class GeoJSONExporter(osmium.SimpleHandler):
             return
         coordinates = [point for _, point in nodes]
         self.way_nodes[way.id] = nodes
+        for node_id, _ in nodes:
+            self.node_way_ids.setdefault(node_id, set()).add(way.id)
         # A way may belong to several relations. Use the highest-ranked network
         # for shared line properties and retain the most demanding difficulty.
         primary_route = min(route_attributes, key=lambda attributes: NETWORK_RANK[attributes['network']])
@@ -586,7 +589,7 @@ def write_route_lines(collector, exporter):
     try:
         with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
             for relation_id, route_relation in collector.relations.items():
-                route_graph = RouteGraph(route_relation, exporter.way_nodes)
+                route_graph = RouteGraph(route_relation, exporter.way_nodes, exporter.node_way_ids)
                 if not route_graph.has_edges:
                     continue
 

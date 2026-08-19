@@ -6,8 +6,9 @@ import networkx as nx
 class RouteGraph:
     """Build and traverse one OSM route relation as an edge-preserving graph."""
 
-    def __init__(self, route_relation, way_nodes):
+    def __init__(self, route_relation, way_nodes, node_way_ids=None):
         self._route_relation = route_relation
+        self._node_way_ids = node_way_ids
         self._graph = nx.MultiGraph()
         self._simple_graph = None
         self._build(way_nodes)
@@ -34,16 +35,24 @@ class RouteGraph:
         if len(components) <= 1:
             return 0
 
-        component_by_node = {
-            node_id: component_index
-            for component_index, component in enumerate(components)
-            for node_id in component
-        }
         endpoints = [
             node_id
             for component in components
             for node_id in self._graph_endpoints(component)
         ]
+        component_by_node = {
+            node_id: component_index
+            for component_index, component in enumerate(components)
+            for node_id in component
+        }
+        component_parent = list(range(len(components)))
+
+        def find_component(component_index):
+            while component_parent[component_index] != component_index:
+                component_parent[component_index] = component_parent[component_parent[component_index]]
+                component_index = component_parent[component_index]
+            return component_index
+
         elevations = {
             node_id: sampler.sample(self.point(node_id))
             for node_id in endpoints
@@ -74,19 +83,17 @@ class RouteGraph:
 
         repairs = 0
         while True:
-            components = list(nx.connected_components(self._graph))
-            if len(components) <= 1:
+            if repairs == len(components) - 1:
                 return repairs
-            component_by_node = {
-                node_id: component_index
-                for component_index, component in enumerate(components)
-                for node_id in component
-            }
             nearest_candidates = {}
             for node_id, candidates in candidates_by_endpoint.items():
                 valid_candidates = []
                 for candidate in candidates:
-                    if component_by_node[node_id] != component_by_node[candidate[1]]:
+                    if (
+                        self._graph.degree(node_id) == 1
+                        and self._graph.degree(candidate[1]) == 1
+                        and find_component(component_by_node[node_id]) != find_component(component_by_node[candidate[1]])
+                    ):
                         valid_candidates.append(candidate)
                         if len(valid_candidates) == 2:
                             break
@@ -117,6 +124,9 @@ class RouteGraph:
                 second_node,
                 [self.point(first_node), self.point(second_node)],
             )
+            first_component = find_component(component_by_node[first_node])
+            second_component = find_component(component_by_node[second_node])
+            component_parent[second_component] = first_component
             repairs += 1
 
     def resolve_start(self, node_coordinates, sampler):
@@ -129,11 +139,7 @@ class RouteGraph:
                 return start_node
             return self._snap_relation_node(start_node, node_coordinates, sampler)
 
-        leaves = [
-            node_id
-            for component in nx.connected_components(self._graph)
-            for node_id in self._graph_endpoints(component)
-        ]
+        leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
             return leaves[0]
         return next(iter(self._graph), None)
@@ -155,52 +161,85 @@ class RouteGraph:
         if start_node not in self._graph or not nx.is_connected(self._graph):
             return None
 
-        finish_candidates = [finish_node] if finish_node is not None else sorted(
+        if finish_node is not None:
+            walk = self._shortest_traversal_to(start_node, finish_node)
+            return None if walk is None else (walk[0], walk[2])
+
+        finish_candidates = sorted(
             self._graph_endpoints(set(self._graph.nodes)) or [start_node]
         )
         best_walk = None
-        if finish_node is None and start_node in finish_candidates:
-            walk = self._shortest_traversal_to(start_node, start_node)
-            if walk is None:
-                finish_candidates.remove(start_node)
-            else:
-                best_walk = walk
-                finish_candidates.remove(start_node)
-
-        if finish_node is None and finish_candidates:
+        if start_node in finish_candidates:
+            best_walk = self._shortest_traversal_to(start_node, start_node)
+            finish_candidates.remove(start_node)
+        if finish_candidates:
             walk = self._shortest_traversal_to(start_node, None, finish_candidates)
             if walk is not None and (best_walk is None or walk[1] < best_walk[1]):
                 best_walk = walk
-        elif finish_node is not None:
-            walk = self._shortest_traversal_to(start_node, finish_node)
-            if walk is not None:
-                best_walk = walk
 
-        if best_walk is None:
-            return None
-        return best_walk[0], best_walk[2]
+        return None if best_walk is None else (best_walk[0], best_walk[2])
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
         current_node = start_node
         for first_node, second_node, _, edge in steps:
-            if first_node == current_node:
+            if current_node == first_node:
+                next_node = second_node
+            elif current_node == second_node:
+                next_node = first_node
+            else:
+                return coordinates, current_node
+
+            if edge['points'][0] == self.point(current_node):
                 edge_points = edge['points']
-                current_node = second_node
             else:
                 edge_points = list(reversed(edge['points']))
-                current_node = first_node
             coordinates.extend(edge_points[1:])
+            current_node = next_node
         return coordinates, current_node
 
     def _build(self, way_nodes):
-        for way_id in self._route_relation['way_ids']:
-            nodes = way_nodes.get(way_id, [])
-            for first_node, second_node in zip(nodes, nodes[1:]):
+        relation_way_nodes = [
+            (way_id, way_nodes.get(way_id, []))
+            for way_id in self._route_relation['way_ids']
+        ]
+        if self._node_way_ids is None:
+            node_way_ids = {}
+            for way_id, nodes in relation_way_nodes:
+                for node_id, _ in nodes:
+                    node_way_ids.setdefault(node_id, set()).add(way_id)
+        else:
+            node_way_ids = self._node_way_ids
+
+        relation_nodes = {
+            node_id
+            for role in ('start', 'end')
+            for node_id in self._route_relation.get('node_roles', {}).get(role, [])
+        }
+        for _, nodes in relation_way_nodes:
+            if len(nodes) < 2:
+                continue
+            if nodes[0][0] == nodes[-1][0]:
+                for first_node, second_node in zip(nodes, nodes[1:]):
+                    self._add_edge(
+                        first_node[0],
+                        second_node[0],
+                        [first_node[1], second_node[1]],
+                    )
+                continue
+
+            important_indices = [0]
+            important_indices.extend(
+                index
+                for index, (node_id, _) in enumerate(nodes[1:-1], start=1)
+                if node_id in relation_nodes or len(node_way_ids[node_id]) > 1
+            )
+            important_indices.append(len(nodes) - 1)
+            for first_index, second_index in zip(important_indices, important_indices[1:]):
                 self._add_edge(
-                    first_node[0],
-                    second_node[0],
-                    [first_node[1], second_node[1]],
+                    nodes[first_index][0],
+                    nodes[second_index][0],
+                    [point for _, point in nodes[first_index:second_index + 1]],
                 )
 
     def _add_edge(self, start_node, end_node, points):
@@ -293,7 +332,7 @@ class RouteGraph:
             dummy_node = object()
             matching_graph.add_node(dummy_node)
             for finish_index, finish_node in enumerate(free_finish_nodes):
-                matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-9)
+                matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-12)
 
         matching = nx.min_weight_matching(matching_graph, weight='weight')
         if len(matching) * 2 != len(matching_graph):

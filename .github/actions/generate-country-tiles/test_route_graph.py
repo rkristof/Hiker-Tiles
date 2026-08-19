@@ -63,6 +63,19 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(finish, 1)
         self.assertEqual(path_finish, 1)
 
+    def test_explicit_finish_is_used(self):
+        relation = {'way_ids': [1, 2], 'node_roles': {'start': [1], 'end': [3]}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        steps, finish = graph.shortest_traversal(1, 3)
+
+        self.assertEqual(finish, 3)
+        self.assertEqual(graph.traversal_coordinates(1, steps)[1], 3)
+
     def test_repair_requires_both_distance_thresholds(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
         way_nodes = {
