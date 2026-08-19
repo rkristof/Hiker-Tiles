@@ -46,7 +46,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g
-        pip3 install osmium rasterio
+        pip3 install networkx osmium rasterio
 
     - name: Generate base map tiles
       uses: ./.github/actions/generate-base-tiles
@@ -80,7 +80,7 @@ runs:
         echo "Natural points: $(wc -l < natural-points.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
         echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"
-        echo "Route lines: $(wc -l < route-lines.geojsonseq)"
+        echo "Route lines: $(wc -l < hiking-routes-interaction.geojsonseq)"
         echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
 
     - name: Download Tippecanoe binary
@@ -115,7 +115,7 @@ runs:
           --no-tile-size-limit \
           --force \
           --named-layer=natural_points:natural-points.geojsonseq \
-          --named-layer=route_lines:route-lines.geojsonseq \
+          --named-layer=hiking_routes_interaction:hiking-routes-interaction.geojsonseq \
           --named-layer=hiking_routes:hiking-routes.geojsonseq \
           --named-layer=hiking_symbols:hiking-symbols.geojsonseq
         mv hiking.mbtiles "${COUNTRY}-hiking.mbtiles"
@@ -123,7 +123,7 @@ runs:
         rm natural-points.geojsonseq \
           hiking-routes.geojsonseq \
           hiking-symbols.geojsonseq \
-          route-lines.geojsonseq
+          hiking-routes-interaction.geojsonseq
         cp base.mbtiles "${COUNTRY}-base.mbtiles"
         echo "Base: $(du -sh "${COUNTRY}-base.mbtiles" | cut -f1)"
 
@@ -157,7 +157,11 @@ runs:
                 elevation_gain_m INTEGER,
                 elevation_loss_m INTEGER,
                 elevation_profile TEXT NOT NULL DEFAULT '[]',
-                duration_min INTEGER
+                duration_min INTEGER,
+                start_lon REAL,
+                start_lat REAL,
+                finish_lon REAL,
+                finish_lat REAL
             )
         ''')
         conn.executemany(
@@ -165,14 +169,16 @@ runs:
             INSERT OR REPLACE INTO routes (
                 id, name, name_int, symbol, network, route_type,
                 min_lon, min_lat, max_lon, max_lat, distance_m,
-                elevation_gain_m, elevation_loss_m, elevation_profile, duration_min
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                elevation_gain_m, elevation_loss_m, elevation_profile, duration_min,
+                start_lon, start_lat, finish_lon, finish_lat
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''',
             [(r['id'], r['name'], r['name_int'], r['symbol'], r['network'], r['type'],
               r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
               r['elevation_gain_m'], r['elevation_loss_m'],
               json.dumps(r['elevation_profile'], separators=(',', ':')),
-              r['duration_min'])
+              r['duration_min'],
+              r['start_lon'], r['start_lat'], r['finish_lon'], r['finish_lat'])
              for r in routes]
         )
         conn.commit()

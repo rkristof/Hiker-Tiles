@@ -1,9 +1,10 @@
 import json
-import math
 import os
 
 import osmium
 import rasterio
+
+from route_graph import RouteGraph, haversine_distance_m, polyline_distance_m
 
 
 NETWORK_GROUP_BY_TAG = {
@@ -44,7 +45,7 @@ ROUTE_MINZOOM = {
     'rwn': 8,
     'lwn': 10,
 }
-ELEVATION_PROFILE_MAX_DISTANCE_M = 25_000
+ELEVATION_PROFILE_MAX_DISTANCE_M = 40_000
 ELEVATION_PROFILE_SAMPLE_INTERVAL_M = 40
 SYMBOL_MINZOOM = {
     'iwn': 7,
@@ -96,9 +97,16 @@ class WayRouteCollector(osmium.SimpleHandler):
             'symbol': self._route_symbol(tags, os.environ['SYMBOL_TAG']),
             'difficulty': self._route_difficulty(os.environ['COUNTRY'], tags),
         }
+        node_roles = {}
+        for member in relation.members:
+            if member.type == 'n' and member.role in ('start', 'end'):
+                node_roles.setdefault(member.role, []).append(member.ref)
+
         self.relations[relation.id] = {
             **route_attributes,
             'way_ids': [member.ref for member in relation.members if member.type == 'w'],
+            'node_roles': node_roles,
+            'roundtrip': tags.get('roundtrip', '').strip().lower() == 'yes',
         }
         for member in relation.members:
             if member.type == 'w':
@@ -236,9 +244,14 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.route_symbols = set()  # unique route symbol values seen
         self.symbol_groups_buffer = []  # buffered (coordinates, route_properties, symbol_entries)
         self.way_groups_buffer = []  # buffered (coordinates, route_properties), merged after the pass
-        self.way_coordinates = {}  # way_id -> coordinates, for route-line stitching
+        self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
+        self.node_coordinates = {}  # node_id -> coordinates for relation endpoint markers
 
     def node(self, node):
+        try:
+            self.node_coordinates[node.id] = [node.lon, node.lat]
+        except osmium.InvalidLocationError:
+            return
         tags = {tag.k: tag.v for tag in node.tags}
         point_properties = self._point_properties(tags)
         if point_properties is None:
@@ -255,12 +268,13 @@ class GeoJSONExporter(osmium.SimpleHandler):
         if not route_attributes:
             return
         try:
-            coordinates = [[node.lon, node.lat] for node in way.nodes]
+            nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
         except osmium.InvalidLocationError:
             return
-        if len(coordinates) < 2:
+        if len(nodes) < 2:
             return
-        self.way_coordinates[way.id] = coordinates
+        coordinates = [point for _, point in nodes]
+        self.way_nodes[way.id] = nodes
         # A way may belong to several relations. Use the highest-ranked network
         # for shared line properties and retain the most demanding difficulty.
         primary_route = min(route_attributes, key=lambda attributes: NETWORK_RANK[attributes['network']])
@@ -344,27 +358,8 @@ def chain_lines(lines):
     return chains
 
 
-def haversine_distance_m(first_point, second_point):
-    earth_radius_m = 6371000
-    first_latitude = math.radians(first_point[1])
-    second_latitude = math.radians(second_point[1])
-    delta_latitude = second_latitude - first_latitude
-    delta_longitude = math.radians(second_point[0] - first_point[0])
-    haversine_term = (
-        math.sin(delta_latitude / 2) ** 2
-        + math.cos(first_latitude)
-        * math.cos(second_latitude)
-        * math.sin(delta_longitude / 2) ** 2
-    )
-    return earth_radius_m * 2 * math.asin(math.sqrt(haversine_term))
-
-
-def route_distance_m(chains):
-    total_distance_m = 0.0
-    for chain in chains:
-        for first_point, second_point in zip(chain, chain[1:]):
-            total_distance_m += haversine_distance_m(first_point, second_point)
-    return round(total_distance_m)
+def route_distance_m(points):
+    return round(polyline_distance_m(points))
 
 
 def interpolate_point(first_point, second_point, fraction):
@@ -374,56 +369,56 @@ def interpolate_point(first_point, second_point, fraction):
     ]
 
 
-def sample_chain_points(chain, interval_m):
+def sample_path_points(path, interval_m):
     """Return route coordinates sampled at fixed distances plus the endpoint."""
-    if len(chain) < 2:
+    if len(path) < 2:
         return []
 
-    samples = [(0.0, chain[0])]
-    chain_distance = 0.0
+    samples = [(0.0, path[0])]
+    path_distance = 0.0
     next_sample_distance = interval_m
-    previous_point = chain[0]
-    for current_point in chain[1:]:
+    previous_point = path[0]
+    for current_point in path[1:]:
         segment_distance = haversine_distance_m(previous_point, current_point)
-        segment_end_distance = chain_distance + segment_distance
+        segment_end_distance = path_distance + segment_distance
         while next_sample_distance <= segment_end_distance:
-            fraction = (next_sample_distance - chain_distance) / segment_distance
+            if segment_distance == 0:
+                break
+            fraction = (next_sample_distance - path_distance) / segment_distance
             samples.append((next_sample_distance, interpolate_point(previous_point, current_point, fraction)))
             next_sample_distance += interval_m
-        chain_distance = segment_end_distance
+        path_distance = segment_end_distance
         previous_point = current_point
 
+    if path_distance > samples[-1][0]:
+        samples.append((path_distance, path[-1]))
     return samples
 
 
-def route_elevation_profile(chains, sampler):
+def route_elevation_profile(path, sampler):
     profile_segments = []
-    route_distance = 0.0
-    for chain in chains:
-        current_segment = []
-        current_segment_start = None
-        sampled_points = sample_chain_points(chain, ELEVATION_PROFILE_SAMPLE_INTERVAL_M)
-        for chain_distance, point in sampled_points:
-            elevation = sampler.sample(point)
-            if elevation is None:
-                if len(current_segment) >= 2:
-                    profile_segments.append({
-                        'start_distance_m': current_segment_start,
-                        'elevations': current_segment,
-                    })
-                current_segment = []
-                current_segment_start = None
-            else:
-                if current_segment_start is None:
-                    current_segment_start = round(route_distance + chain_distance)
-                current_segment.append(round(elevation))
+    current_segment = []
+    current_segment_start = None
+    for path_distance, point in sample_path_points(path, ELEVATION_PROFILE_SAMPLE_INTERVAL_M):
+        elevation = sampler.sample(point)
+        if elevation is None:
+            if len(current_segment) >= 2:
+                profile_segments.append({
+                    'start_distance_m': current_segment_start,
+                    'elevations': current_segment,
+                })
+            current_segment = []
+            current_segment_start = None
+        else:
+            if current_segment_start is None:
+                current_segment_start = round(path_distance)
+            current_segment.append(round(elevation))
 
-        if len(current_segment) >= 2:
-            profile_segments.append({
-                'start_distance_m': current_segment_start,
-                'elevations': current_segment,
-            })
-        route_distance += route_distance_m([chain])
+    if len(current_segment) >= 2:
+        profile_segments.append({
+            'start_distance_m': current_segment_start,
+            'elevations': current_segment,
+        })
 
     return {'segments': profile_segments}
 
@@ -483,26 +478,25 @@ class ElevationSampler:
         self.tiles.clear()
 
 
-def route_elevation_change(chains, sampler):
+def route_elevation_change(path, sampler):
     elevation_gain_m = 0.0
     elevation_loss_m = 0.0
     elevation_threshold_m = 2.0
-    for chain in chains:
-        previous_elevation = None
-        for point in chain:
-            current_elevation = sampler.sample(point)
-            if current_elevation is None:
-                # Do not calculate a gain/loss across a gap in DEM coverage.
-                previous_elevation = None
-                continue
-            if previous_elevation is not None:
-                elevation_delta_m = current_elevation - previous_elevation
-                # Ignore small changes caused by DEM noise.
-                if elevation_delta_m >= elevation_threshold_m:
-                    elevation_gain_m += elevation_delta_m
-                elif elevation_delta_m <= -elevation_threshold_m:
-                    elevation_loss_m -= elevation_delta_m
-            previous_elevation = current_elevation
+    previous_elevation = None
+    for point in path:
+        current_elevation = sampler.sample(point)
+        if current_elevation is None:
+            # Do not calculate a gain/loss across a gap in DEM coverage.
+            previous_elevation = None
+            continue
+        if previous_elevation is not None:
+            elevation_delta_m = current_elevation - previous_elevation
+            # Ignore small changes caused by DEM noise.
+            if elevation_delta_m >= elevation_threshold_m:
+                elevation_gain_m += elevation_delta_m
+            elif elevation_delta_m <= -elevation_threshold_m:
+                elevation_loss_m -= elevation_delta_m
+        previous_elevation = current_elevation
     return round(elevation_gain_m), round(elevation_loss_m)
 
 
@@ -589,23 +583,40 @@ def write_route_lines(collector, exporter):
     route_feature_count = 0
     elevation_sampler = ElevationSampler(os.environ['ELEVATION_DIRECTORY'])
     try:
-        with open('route-lines.geojsonseq', 'w') as route_lines_file:
+        with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
             for relation_id, route_relation in collector.relations.items():
-                # A relation can yield multiple chains when ways are disconnected
-                # or a junction has more than one possible continuation.
-                chains = chain_lines([
-                    exporter.way_coordinates[way_id]
-                    for way_id in route_relation['way_ids']
-                    if way_id in exporter.way_coordinates
-                ])
-                if not chains:
+                route_graph = RouteGraph(route_relation, exporter.way_nodes)
+                if not route_graph.has_edges:
                     continue
-                all_coordinates = [point for chain in chains for point in chain]
-                elevation_gain_m, elevation_loss_m = route_elevation_change(chains, elevation_sampler)
-                distance_m = route_distance_m(chains)
+
+                route_graph.repair_disconnected_components(elevation_sampler)
+                start_node = route_graph.resolve_start(exporter.node_coordinates, elevation_sampler)
+                finish_node = route_graph.resolve_finish(
+                    start_node, exporter.node_coordinates, elevation_sampler
+                )
+                explicit_finish = bool(route_relation.get('node_roles', {}).get('end'))
+                lower_bound_distance_m = route_graph.required_distance_m()
+
+                if route_graph.component_count > 1:
+                    continue
+                if start_node is None:
+                    continue
+                if explicit_finish and finish_node is None:
+                    continue
+                if lower_bound_distance_m >= ELEVATION_PROFILE_MAX_DISTANCE_M:
+                    continue
+
+                traversal = route_graph.shortest_traversal(start_node, finish_node)
+                if traversal is None:
+                    continue
+
+                steps, finish_node = traversal
+                path, _ = route_graph.traversal_coordinates(start_node, steps)
+                distance_m = route_distance_m(path)
+                elevation_gain_m, elevation_loss_m = route_elevation_change(path, elevation_sampler)
                 elevation_profile = (
-                    route_elevation_profile(chains, elevation_sampler)
-                    if distance_m <= ELEVATION_PROFILE_MAX_DISTANCE_M
+                    route_elevation_profile(path, elevation_sampler)
+                    if distance_m < ELEVATION_PROFILE_MAX_DISTANCE_M
                     else {'segments': []}
                 )
                 duration_min = route_duration_min(distance_m, elevation_gain_m, elevation_loss_m)
@@ -616,15 +627,19 @@ def write_route_lines(collector, exporter):
                     'symbol': route_relation['symbol'],
                     'network': route_relation['network'],
                     'type': route_relation['type'],
-                    'min_lon': min(point[0] for point in all_coordinates),
-                    'min_lat': min(point[1] for point in all_coordinates),
-                    'max_lon': max(point[0] for point in all_coordinates),
-                    'max_lat': max(point[1] for point in all_coordinates),
+                    'min_lon': min(point[0] for point in path),
+                    'min_lat': min(point[1] for point in path),
+                    'max_lon': max(point[0] for point in path),
+                    'max_lat': max(point[1] for point in path),
                     'distance_m': distance_m,
                     'elevation_gain_m': elevation_gain_m,
                     'elevation_loss_m': elevation_loss_m,
                     'elevation_profile': elevation_profile,
                     'duration_min': duration_min,
+                    'start_lon': route_graph.point(start_node)[0],
+                    'start_lat': route_graph.point(start_node)[1],
+                    'finish_lon': route_graph.point(finish_node)[0],
+                    'finish_lat': route_graph.point(finish_node)[1],
                 })
                 route_properties = {
                     'relation_id': relation_id,
@@ -633,19 +648,18 @@ def write_route_lines(collector, exporter):
                     'network': route_relation['network'],
                     'route_type': route_relation['type'],
                 }
-                for chain in chains:
-                    write_feature(
-                        route_lines_file,
-                        {'type': 'LineString', 'coordinates': chain},
-                        route_properties,
-                    )
-                    route_feature_count += 1
+                write_feature(
+                    route_lines_file,
+                    {'type': 'LineString', 'coordinates': path},
+                    route_properties,
+                )
+                route_feature_count += 1
     finally:
         elevation_sampler.close()
 
     with open('routes-meta.json', 'w') as metadata_file:
         json.dump(route_metadata, metadata_file)
-    print(f'Route lines: {len(route_metadata)} routes, {route_feature_count} chain features')
+    print(f'Route lines: {len(route_metadata)} routes, {route_feature_count} route features')
 
 
 def write_symbol_catalog(exporter):
