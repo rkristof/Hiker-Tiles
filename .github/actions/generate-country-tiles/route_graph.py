@@ -9,6 +9,7 @@ class RouteGraph:
     def __init__(self, route_relation, way_nodes):
         self._route_relation = route_relation
         self._graph = nx.MultiGraph()
+        self._simple_graph = None
         self._build(way_nodes)
 
     @property
@@ -29,49 +30,84 @@ class RouteGraph:
         ))
 
     def repair_disconnected_components(self, sampler):
+        components = list(nx.connected_components(self._graph))
+        if len(components) <= 1:
+            return 0
+
+        component_by_node = {
+            node_id: component_index
+            for component_index, component in enumerate(components)
+            for node_id in component
+        }
+        endpoints = [
+            node_id
+            for component in components
+            for node_id in self._graph_endpoints(component)
+        ]
+        elevations = {
+            node_id: sampler.sample(self.point(node_id))
+            for node_id in endpoints
+        }
+        candidates_by_endpoint = {node_id: [] for node_id in endpoints}
+        for first_index, first_node in enumerate(endpoints):
+            first_elevation = elevations[first_node]
+            if first_elevation is None:
+                continue
+            first_point = self.point(first_node)
+            for second_node in endpoints[first_index + 1:]:
+                if component_by_node[first_node] == component_by_node[second_node]:
+                    continue
+                second_elevation = elevations[second_node]
+                if second_elevation is None:
+                    continue
+                second_point = self.point(second_node)
+                horizontal_distance = haversine_distance_m(first_point, second_point)
+                if horizontal_distance >= 100:
+                    continue
+                if abs(first_elevation - second_elevation) >= 15:
+                    continue
+                candidates_by_endpoint[first_node].append((horizontal_distance, second_node))
+                candidates_by_endpoint[second_node].append((horizontal_distance, first_node))
+
+        for candidates in candidates_by_endpoint.values():
+            candidates.sort()
+
         repairs = 0
         while True:
             components = list(nx.connected_components(self._graph))
             if len(components) <= 1:
                 return repairs
-
             component_by_node = {
                 node_id: component_index
                 for component_index, component in enumerate(components)
                 for node_id in component
             }
-            endpoints = [
-                node_id
-                for component in components
-                for node_id in self._graph_endpoints(component)
-            ]
-            candidates = []
-            for first_index, first_node in enumerate(endpoints):
-                for second_node in endpoints[first_index + 1:]:
-                    if component_by_node[first_node] == component_by_node[second_node]:
-                        continue
-                    first_point = self.point(first_node)
-                    second_point = self.point(second_node)
-                    horizontal_distance = haversine_distance_m(first_point, second_point)
-                    if horizontal_distance >= 100:
-                        continue
-                    first_elevation = sampler.sample(first_point)
-                    second_elevation = sampler.sample(second_point)
-                    if first_elevation is None or second_elevation is None:
-                        continue
-                    if abs(first_elevation - second_elevation) >= 15:
-                        continue
-                    candidates.append((horizontal_distance, first_node, second_node))
+            nearest_candidates = {}
+            for node_id, candidates in candidates_by_endpoint.items():
+                valid_candidates = []
+                for candidate in candidates:
+                    if component_by_node[node_id] != component_by_node[candidate[1]]:
+                        valid_candidates.append(candidate)
+                        if len(valid_candidates) == 2:
+                            break
+                if valid_candidates:
+                    is_unique = (
+                        len(valid_candidates) == 1
+                        or abs(valid_candidates[0][0] - valid_candidates[1][0]) >= 1e-6
+                    )
+                    nearest_candidates[node_id] = (valid_candidates[0], is_unique)
 
-            if not candidates:
-                return repairs
-
-            mutual_candidates = [
-                candidate
-                for candidate in candidates
-                if self._is_unique_nearest(candidate[1], candidate, candidates)
-                and self._is_unique_nearest(candidate[2], candidate, candidates)
-            ]
+            mutual_candidates = []
+            for first_node, (candidate, is_unique) in nearest_candidates.items():
+                second_node = candidate[1]
+                reverse_candidate = nearest_candidates.get(second_node)
+                if (
+                    is_unique
+                    and reverse_candidate is not None
+                    and reverse_candidate[1]
+                    and reverse_candidate[0][1] == first_node
+                ):
+                    mutual_candidates.append((candidate[0], first_node, second_node))
             if not mutual_candidates:
                 return repairs
 
@@ -123,13 +159,26 @@ class RouteGraph:
             self._graph_endpoints(set(self._graph.nodes)) or [start_node]
         )
         best_walk = None
-        for candidate in finish_candidates:
-            walk = self._shortest_traversal_to(start_node, candidate)
+        if finish_node is None and start_node in finish_candidates:
+            walk = self._shortest_traversal_to(start_node, start_node)
             if walk is None:
-                continue
-            if best_walk is None or walk[1] < best_walk[1]:
+                finish_candidates.remove(start_node)
+            else:
                 best_walk = walk
-        return (best_walk[0], best_walk[2]) if best_walk is not None else None
+                finish_candidates.remove(start_node)
+
+        if finish_node is None and finish_candidates:
+            walk = self._shortest_traversal_to(start_node, None, finish_candidates)
+            if walk is not None and (best_walk is None or walk[1] < best_walk[1]):
+                best_walk = walk
+        elif finish_node is not None:
+            walk = self._shortest_traversal_to(start_node, finish_node)
+            if walk is not None:
+                best_walk = walk
+
+        if best_walk is None:
+            return None
+        return best_walk[0], best_walk[2]
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -158,6 +207,7 @@ class RouteGraph:
         if start_node == end_node or len(points) < 2:
             return
 
+        self._simple_graph = None
         self._graph.add_node(start_node, point=points[0])
         self._graph.add_node(end_node, point=points[-1])
         self._graph.add_edge(
@@ -169,19 +219,6 @@ class RouteGraph:
 
     def _graph_endpoints(self, component):
         return [node_id for node_id in component if self._graph.degree(node_id) == 1]
-
-    @staticmethod
-    def _is_unique_nearest(node_id, candidate, candidates):
-        distances = [
-            distance
-            for distance, first_node, second_node in candidates
-            if node_id in (first_node, second_node)
-        ]
-        nearest_distance = min(distances)
-        return sum(
-            abs(distance - nearest_distance) < 1e-6
-            for distance in distances
-        ) == 1 and abs(candidate[0] - nearest_distance) < 1e-6
 
     def _snap_relation_node(self, relation_node_id, node_coordinates, sampler):
         relation_point = node_coordinates.get(relation_node_id)
@@ -208,6 +245,9 @@ class RouteGraph:
         return candidates[0][1]
 
     def _simple_weighted_graph(self):
+        if self._simple_graph is not None:
+            return self._simple_graph
+
         simple_graph = nx.Graph()
         for first_node, second_node, edge_key, attributes in self._graph.edges(data=True, keys=True):
             if (
@@ -220,43 +260,74 @@ class RouteGraph:
                     weight=attributes['distance_m'],
                     edge_key=edge_key,
                 )
+        self._simple_graph = simple_graph
         return simple_graph
 
-    def _matching_paths(self, nodes):
+    def _matching_paths(self, nodes, free_finish_nodes=None):
         simple_graph = self._simple_weighted_graph()
         matching_graph = nx.Graph()
-        paths = {}
+        matching_graph.add_nodes_from(nodes)
+        shortest_paths = {}
+        shortest_distances = {}
+        for source in nodes:
+            distances, paths = nx.single_source_dijkstra(
+                simple_graph,
+                source,
+                weight='weight',
+            )
+            shortest_distances[source] = distances
+            shortest_paths[source] = paths
+
         for first_index, first_node in enumerate(nodes):
             for second_node in nodes[first_index + 1:]:
-                try:
-                    path = nx.shortest_path(
-                        simple_graph,
-                        first_node,
-                        second_node,
-                        weight='weight',
-                    )
-                except nx.NetworkXNoPath:
+                if second_node not in shortest_distances[first_node]:
                     return None
-                distance = sum(
-                    simple_graph[path[index]][path[index + 1]]['weight']
-                    for index in range(len(path) - 1)
+                matching_graph.add_edge(
+                    first_node,
+                    second_node,
+                    weight=shortest_distances[first_node][second_node],
                 )
-                matching_graph.add_edge(first_node, second_node, weight=distance)
-                paths[frozenset((first_node, second_node))] = path
+
+        dummy_node = None
+        if free_finish_nodes:
+            dummy_node = object()
+            matching_graph.add_node(dummy_node)
+            for finish_index, finish_node in enumerate(free_finish_nodes):
+                matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-9)
 
         matching = nx.min_weight_matching(matching_graph, weight='weight')
-        if len(matching) * 2 != len(nodes):
+        if len(matching) * 2 != len(matching_graph):
             return None
-        return [paths[frozenset(pair)] for pair in matching], simple_graph
 
-    def _shortest_traversal_to(self, start_node, finish_node):
-        target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
+        paths = []
+        selected_finish = None
+        for pair in matching:
+            first_node, second_node = tuple(pair)
+            if dummy_node is not None and first_node is dummy_node:
+                selected_finish = second_node
+                continue
+            if dummy_node is not None and second_node is dummy_node:
+                selected_finish = first_node
+                continue
+            paths.append(shortest_paths[first_node][second_node])
+        return paths, simple_graph, selected_finish
+
+    def _shortest_traversal_to(self, start_node, finish_node, free_finish_nodes=None):
         odd_nodes = {node_id for node_id, degree in self._graph.degree() if degree % 2}
-        paths_result = self._matching_paths(sorted(odd_nodes ^ target_odd_nodes))
+        if free_finish_nodes is None:
+            target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
+            matching_nodes = odd_nodes ^ target_odd_nodes
+        else:
+            matching_nodes = odd_nodes ^ {start_node}
+        paths_result = self._matching_paths(sorted(matching_nodes), free_finish_nodes)
         if paths_result is None:
             return None
 
-        paths, simple_graph = paths_result
+        paths, simple_graph, selected_finish = paths_result
+        if free_finish_nodes is not None:
+            finish_node = selected_finish
+            if finish_node is None:
+                return None
         augmented_graph = self._graph.copy()
         for path in paths:
             for first_node, second_node in zip(path, path[1:]):
