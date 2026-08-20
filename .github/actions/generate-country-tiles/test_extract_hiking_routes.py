@@ -31,15 +31,14 @@ class ExtractHikingRoutesTests(unittest.TestCase):
         self.assertEqual(len(samples), 4)
         self.assertEqual(samples[0][0], 0)
         self.assertGreater(samples[-1][0], samples[-2][0])
-        profile_samples = profile['segments'][0]['samples']
-        self.assertEqual(len(profile_samples), 4)
-        self.assertEqual(profile_samples[0]['distance_m'], 0)
-        self.assertEqual(profile_samples[-1]['distance_m'], round(samples[-1][0]))
-        self.assertEqual(profile_samples[0]['longitude'], path[0][0])
-        self.assertEqual(profile_samples[0]['latitude'], path[0][1])
-        self.assertEqual(profile_samples[-1]['longitude'], path[-1][0])
-        self.assertEqual(profile_samples[-1]['latitude'], path[-1][1])
-        self.assertEqual(profile_samples[-1]['elevation_m'], 100)
+        profile_segment = profile['segments'][0]
+        self.assertEqual(profile_segment['start_m'], 0)
+        self.assertEqual(profile_segment['end_m'], round(samples[-1][0]))
+        self.assertEqual(len(profile_segment['elevations']), 4)
+        self.assertEqual(profile_segment['elevations'][-1], 100)
+        self.assertTrue(profile_segment['coordinates'])
+        self.assertNotIn('longitude', profile_segment)
+        self.assertNotIn('latitude', profile_segment)
 
     def test_profile_keeps_dem_gaps_as_separate_segments(self):
         class GapSampler:
@@ -51,13 +50,20 @@ class ExtractHikingRoutesTests(unittest.TestCase):
 
         self.assertEqual(len(profile['segments']), 2)
         self.assertEqual(
-            [sample['distance_m'] for sample in profile['segments'][0]['samples']],
-            [0, 40, 80, 120],
+            (profile['segments'][0]['start_m'], profile['segments'][0]['end_m']),
+            (0, 120),
         )
         self.assertEqual(
-            [sample['distance_m'] for sample in profile['segments'][1]['samples']],
-            [240, 280, 320, 334],
+            (profile['segments'][1]['start_m'], profile['segments'][1]['end_m']),
+            (240, 334),
         )
+
+    def test_profile_coordinates_are_quantized_to_five_decimal_places(self):
+        points = [[12.345674, 47.123454], [12.345686, 47.123466]]
+
+        encoded = routes.encode_polyline(points)
+
+        self.assertEqual(encoded, 'qxr~GmgjjACC')
 
 
 if __name__ == '__main__':

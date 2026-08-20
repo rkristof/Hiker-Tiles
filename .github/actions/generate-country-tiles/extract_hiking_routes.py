@@ -48,6 +48,7 @@ ROUTE_MINZOOM = {
 }
 ELEVATION_PROFILE_MAX_DISTANCE_M = 40_000
 ELEVATION_PROFILE_SAMPLE_INTERVAL_M = 40
+ELEVATION_PROFILE_COORDINATE_PRECISION = 5
 SYMBOL_MINZOOM = {
     'iwn': 7,
     'nwn': 9,
@@ -399,6 +400,43 @@ def sample_path_points(path, interval_m):
     return samples
 
 
+def encode_polyline(points, precision=ELEVATION_PROFILE_COORDINATE_PRECISION):
+    """Encode longitude/latitude points with Google polyline delta encoding."""
+    factor = 10 ** precision
+    previous_latitude = 0
+    previous_longitude = 0
+    encoded = []
+
+    def encode_value(value):
+        value = ~(value << 1) if value < 0 else value << 1
+        characters = []
+        while value >= 0x20:
+            characters.append(chr((0x20 | (value & 0x1F)) + 63))
+            value >>= 5
+        characters.append(chr(value + 63))
+        return ''.join(characters)
+
+    for longitude, latitude in points:
+        quantized_latitude = math.floor(latitude * factor + 0.5)
+        quantized_longitude = math.floor(longitude * factor + 0.5)
+        encoded.append(encode_value(quantized_latitude - previous_latitude))
+        encoded.append(encode_value(quantized_longitude - previous_longitude))
+        previous_latitude = quantized_latitude
+        previous_longitude = quantized_longitude
+
+    return ''.join(encoded)
+
+
+def build_elevation_profile_segment(samples):
+    """Pack sampled elevations and coordinates into one compact profile segment."""
+    return {
+        'start_m': samples[0][0],
+        'end_m': samples[-1][0],
+        'elevations': [elevation for _, _, elevation in samples],
+        'coordinates': encode_polyline([point for _, point, _ in samples]),
+    }
+
+
 def route_elevation_profile(path, sampler):
     profile_segments = []
     current_segment = []
@@ -406,18 +444,13 @@ def route_elevation_profile(path, sampler):
         elevation = sampler.sample(point)
         if elevation is None:
             if len(current_segment) >= 2:
-                profile_segments.append({'samples': current_segment})
+                profile_segments.append(build_elevation_profile_segment(current_segment))
             current_segment = []
         else:
-            current_segment.append({
-                'distance_m': round(path_distance),
-                'elevation_m': round(elevation),
-                'longitude': point[0],
-                'latitude': point[1],
-            })
+            current_segment.append((round(path_distance), point, round(elevation)))
 
     if len(current_segment) >= 2:
-        profile_segments.append({'samples': current_segment})
+        profile_segments.append(build_elevation_profile_segment(current_segment))
 
     return {'segments': profile_segments}
 
