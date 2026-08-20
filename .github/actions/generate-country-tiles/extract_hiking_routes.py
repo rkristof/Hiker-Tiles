@@ -402,27 +402,22 @@ def sample_path_points(path, interval_m):
 def route_elevation_profile(path, sampler):
     profile_segments = []
     current_segment = []
-    current_segment_start = None
     for path_distance, point in sample_path_points(path, ELEVATION_PROFILE_SAMPLE_INTERVAL_M):
         elevation = sampler.sample(point)
         if elevation is None:
             if len(current_segment) >= 2:
-                profile_segments.append({
-                    'start_distance_m': current_segment_start,
-                    'elevations': current_segment,
-                })
+                profile_segments.append({'samples': current_segment})
             current_segment = []
-            current_segment_start = None
         else:
-            if current_segment_start is None:
-                current_segment_start = round(path_distance)
-            current_segment.append(round(elevation))
+            current_segment.append({
+                'distance_m': round(path_distance),
+                'elevation_m': round(elevation),
+                'longitude': point[0],
+                'latitude': point[1],
+            })
 
     if len(current_segment) >= 2:
-        profile_segments.append({
-            'start_distance_m': current_segment_start,
-            'elevations': current_segment,
-        })
+        profile_segments.append({'samples': current_segment})
 
     return {'segments': profile_segments}
 
