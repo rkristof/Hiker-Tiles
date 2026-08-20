@@ -165,6 +165,10 @@ class RouteGraph:
             walk = self._shortest_traversal_to(start_node, finish_node)
             return None if walk is None else (walk[0], walk[2])
 
+        closed_walk = self._shortest_traversal_to(start_node, start_node)
+        if closed_walk is not None:
+            return closed_walk[0], closed_walk[2]
+
         finish_candidates = sorted(
             self._graph_endpoints(set(self._graph.nodes)) or [start_node]
         )

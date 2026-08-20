@@ -31,7 +31,7 @@ class SteepSampler:
 
 
 class RouteGraphTests(unittest.TestCase):
-    def test_branch_is_walked_out_and_back(self):
+    def test_branch_prefers_closed_traversal(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {'start': [1]}}
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
@@ -42,13 +42,13 @@ class RouteGraphTests(unittest.TestCase):
         steps, finish = graph.shortest_traversal(1)
         path, path_finish = graph.traversal_coordinates(1, steps)
 
-        self.assertEqual(finish, 3)
-        self.assertEqual(path_finish, 3)
+        self.assertEqual(finish, 1)
+        self.assertEqual(path_finish, 1)
         self.assertEqual(path[0], [0.0, 0.0])
-        self.assertEqual(path[-1], [0.002, 0.0])
+        self.assertEqual(path[-1], [0.0, 0.0])
         self.assertIn([0.001, 0.001], path)
         self.assertIn([0.001, -0.001], path)
-        self.assertEqual(len(steps), 6)
+        self.assertEqual(len(steps), 8)
 
     def test_roundtrip_returns_to_start(self):
         relation = {'way_ids': [1, 2], 'node_roles': {'start': [1]}, 'roundtrip': True}
