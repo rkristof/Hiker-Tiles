@@ -165,23 +165,21 @@ class RouteGraph:
             walk = self._shortest_traversal_to(start_node, finish_node)
             return None if walk is None else (walk[0], walk[2])
 
-        closed_walk = self._shortest_traversal_to(start_node, start_node)
-        if closed_walk is not None:
-            return closed_walk[0], closed_walk[2]
+        if self._is_on_cycle(start_node):
+            closed_walk = self._shortest_traversal_to(start_node, start_node)
+            if closed_walk is not None:
+                return closed_walk[0], closed_walk[2]
 
         finish_candidates = sorted(
-            self._graph_endpoints(set(self._graph.nodes)) or [start_node]
+            node_id
+            for node_id, degree in self._graph.degree()
+            if node_id != start_node and degree % 2 == 1
         )
-        best_walk = None
-        if start_node in finish_candidates:
-            best_walk = self._shortest_traversal_to(start_node, start_node)
-            finish_candidates.remove(start_node)
-        if finish_candidates:
-            walk = self._shortest_traversal_to(start_node, None, finish_candidates)
-            if walk is not None and (best_walk is None or walk[1] < best_walk[1]):
-                best_walk = walk
+        if not finish_candidates:
+            return None
 
-        return None if best_walk is None else (best_walk[0], best_walk[2])
+        open_walk = self._shortest_traversal_to(start_node, None, finish_candidates)
+        return None if open_walk is None else (open_walk[0], open_walk[2])
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -262,6 +260,16 @@ class RouteGraph:
 
     def _graph_endpoints(self, component):
         return [node_id for node_id in component if self._graph.degree(node_id) == 1]
+
+    def _is_on_cycle(self, node_id):
+        bridge_edges = {
+            frozenset((first_node, second_node))
+            for first_node, second_node in nx.bridges(self._graph)
+        }
+        return any(
+            frozenset((node_id, neighbor)) not in bridge_edges
+            for neighbor in self._graph.neighbors(node_id)
+        )
 
     def _snap_relation_node(self, relation_node_id, node_coordinates, sampler):
         relation_point = node_coordinates.get(relation_node_id)
