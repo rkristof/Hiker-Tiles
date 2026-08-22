@@ -49,6 +49,7 @@ ROUTE_MINZOOM = {
 ELEVATION_PROFILE_MAX_DISTANCE_M = 40_000
 ELEVATION_PROFILE_SAMPLE_INTERVAL_M = 40
 ELEVATION_PROFILE_COORDINATE_PRECISION = 5
+ELEVATION_REVERSAL_THRESHOLD_M = 5.0
 SYMBOL_MINZOOM = {
     'iwn': 7,
     'nwn': 9,
@@ -437,45 +438,95 @@ def build_elevation_profile_segment(samples):
     }
 
 
+def calculate_elevation_change(samples):
+    """Calculate gain and loss after filtering insignificant reversals."""
+    if len(samples) < 2:
+        return 0, 0
+
+    elevation_gain_m = 0.0
+    elevation_loss_m = 0.0
+    anchor_elevation = samples[0][2]
+    candidate_elevation = anchor_elevation
+    direction = 0
+
+    for _, _, elevation in samples[1:]:
+        if direction == 0:
+            if elevation > candidate_elevation:
+                direction = 1
+                candidate_elevation = elevation
+            elif elevation < candidate_elevation:
+                direction = -1
+                candidate_elevation = elevation
+            continue
+
+        if direction == 1:
+            if elevation >= candidate_elevation:
+                candidate_elevation = elevation
+            elif candidate_elevation - elevation >= ELEVATION_REVERSAL_THRESHOLD_M:
+                elevation_delta_m = candidate_elevation - anchor_elevation
+                if elevation_delta_m >= ELEVATION_REVERSAL_THRESHOLD_M:
+                    elevation_gain_m += elevation_delta_m
+                    anchor_elevation = candidate_elevation
+                direction = -1
+                candidate_elevation = elevation
+        elif direction == -1:
+            if elevation <= candidate_elevation:
+                candidate_elevation = elevation
+            elif elevation - candidate_elevation >= ELEVATION_REVERSAL_THRESHOLD_M:
+                elevation_delta_m = anchor_elevation - candidate_elevation
+                if elevation_delta_m >= ELEVATION_REVERSAL_THRESHOLD_M:
+                    elevation_loss_m += elevation_delta_m
+                    anchor_elevation = candidate_elevation
+                direction = 1
+                candidate_elevation = elevation
+
+    if direction == 1:
+        elevation_delta_m = candidate_elevation - anchor_elevation
+        if elevation_delta_m >= ELEVATION_REVERSAL_THRESHOLD_M:
+            elevation_gain_m += elevation_delta_m
+    elif direction == -1:
+        elevation_delta_m = anchor_elevation - candidate_elevation
+        if elevation_delta_m >= ELEVATION_REVERSAL_THRESHOLD_M:
+            elevation_loss_m += elevation_delta_m
+
+    return round(elevation_gain_m), round(elevation_loss_m)
+
+
 def route_elevation(path, sampler, include_profile=True):
     """Sample route elevation once and calculate totals with an optional profile."""
     elevation_gain_m = 0.0
     elevation_loss_m = 0.0
-    elevation_threshold_m = 2.0
     profile_segments = []
     current_segment = []
 
     def close_segment():
-        nonlocal current_segment
-        if include_profile and len(current_segment) >= 2:
+        nonlocal current_segment, elevation_gain_m, elevation_loss_m
+        if len(current_segment) < 2:
+            current_segment = []
+            return
+
+        segment_gain_m, segment_loss_m = calculate_elevation_change(current_segment)
+        elevation_gain_m += segment_gain_m
+        elevation_loss_m += segment_loss_m
+        if include_profile:
             profile_segments.append(build_elevation_profile_segment([
                 (path_distance, point, round(elevation))
                 for path_distance, point, elevation in current_segment
             ]))
         current_segment = []
 
-    previous_elevation = None
     for path_distance, point in sample_path_points(path, ELEVATION_PROFILE_SAMPLE_INTERVAL_M):
         elevation = sampler.sample(point)
         if elevation is None:
             close_segment()
-            previous_elevation = None
             continue
 
-        if previous_elevation is not None:
-            elevation_delta_m = elevation - previous_elevation
-            # Ignore small changes caused by DEM noise.
-            if elevation_delta_m >= elevation_threshold_m:
-                elevation_gain_m += elevation_delta_m
-            elif elevation_delta_m <= -elevation_threshold_m:
-                elevation_loss_m -= elevation_delta_m
-        previous_elevation = elevation
         current_segment.append((round(path_distance), point, elevation))
 
     close_segment()
     return {
-        'elevation_gain_m': round(elevation_gain_m),
-        'elevation_loss_m': round(elevation_loss_m),
+        'elevation_gain_m': elevation_gain_m,
+        'elevation_loss_m': elevation_loss_m,
         'profile': {'segments': profile_segments},
     }
 

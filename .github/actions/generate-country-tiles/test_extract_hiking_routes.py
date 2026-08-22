@@ -32,6 +32,17 @@ class SpatialNoiseSampler:
         return 100 + 4 * (spatial_band % 2)
 
 
+class SequenceSampler:
+    def __init__(self, elevations):
+        self.elevations = elevations
+        self.sample_count = 0
+
+    def sample(self, point):
+        elevation = self.elevations[self.sample_count]
+        self.sample_count += 1
+        return elevation
+
+
 class ExtractHikingRoutesTests(unittest.TestCase):
     def test_profile_includes_off_grid_endpoint(self):
         path = [[0.0000, 0.0000], [0.0010, 0.0000]]
@@ -79,24 +90,31 @@ class ExtractHikingRoutesTests(unittest.TestCase):
         path = [[index * 0.0001, 0.0] for index in range(41)]
         sampler = SpatialNoiseSampler()
         elevation = routes.route_elevation(path, sampler)
-        profile = elevation['profile']
+        self.assertEqual(sampler.sample_count, len(routes.sample_path_points(path, 40)))
 
-        expected_gain = 0
-        expected_loss = 0
-        for segment in profile['segments']:
-            elevations = segment['elevations']
-            for previous, current in zip(elevations, elevations[1:]):
-                delta = current - previous
-                if delta >= 2:
-                    expected_gain += delta
-                elif delta <= -2:
-                    expected_loss -= delta
+    def test_elevation_change_ignores_insignificant_reversals(self):
+        path = [[0.0, 0.0], [0.0018, 0.0]]
+        elevation = routes.route_elevation(
+            path,
+            SequenceSampler([100, 104, 101, 105, 102, 106, 106]),
+        )
 
         self.assertEqual(
             (elevation['elevation_gain_m'], elevation['elevation_loss_m']),
-            (expected_gain, expected_loss),
+            (6, 0),
         )
-        self.assertEqual(sampler.sample_count, len(routes.sample_path_points(path, 40)))
+
+    def test_elevation_change_preserves_significant_peak_and_valley(self):
+        path = [[0.0, 0.0], [0.0018, 0.0]]
+        elevation = routes.route_elevation(
+            path,
+            SequenceSampler([100, 110, 120, 115, 105, 100, 100]),
+        )
+
+        self.assertEqual(
+            (elevation['elevation_gain_m'], elevation['elevation_loss_m']),
+            (20, 20),
+        )
 
 
 if __name__ == '__main__':
