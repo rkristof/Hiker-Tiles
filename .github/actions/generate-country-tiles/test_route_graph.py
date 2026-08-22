@@ -31,6 +31,20 @@ class SteepSampler:
 
 
 class RouteGraphTests(unittest.TestCase):
+    def test_missing_start_uses_closest_endpoint(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            2: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            3: [(3, [0.0020, 0.0000]), (4, [0.0040, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start({}, None)
+
+        self.assertEqual(start, 1)
+        self.assertEqual(graph._graph.degree(start), 1)
+
     def test_acyclic_branch_uses_open_traversal(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {'start': [1]}}
         way_nodes = {

@@ -142,6 +142,20 @@ class RouteGraph:
         leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
             return leaves[0]
+        if leaves:
+            anchor_node = next(iter(self._graph), None)
+            if anchor_node is not None:
+                distances = nx.single_source_dijkstra_path_length(
+                    self._simple_weighted_graph(),
+                    anchor_node,
+                    weight='weight',
+                )
+                reachable_leaves = [leaf for leaf in leaves if leaf in distances]
+                if reachable_leaves:
+                    return min(
+                        reachable_leaves,
+                        key=lambda leaf: (distances[leaf], leaf),
+                    )
         return next(iter(self._graph), None)
 
     def resolve_finish(self, start_node, node_coordinates, sampler):
