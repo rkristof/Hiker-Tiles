@@ -437,22 +437,47 @@ def build_elevation_profile_segment(samples):
     }
 
 
-def route_elevation_profile(path, sampler):
+def route_elevation(path, sampler, include_profile=True):
+    """Sample route elevation once and calculate totals with an optional profile."""
+    elevation_gain_m = 0.0
+    elevation_loss_m = 0.0
+    elevation_threshold_m = 2.0
     profile_segments = []
     current_segment = []
+
+    def close_segment():
+        nonlocal current_segment
+        if include_profile and len(current_segment) >= 2:
+            profile_segments.append(build_elevation_profile_segment([
+                (path_distance, point, round(elevation))
+                for path_distance, point, elevation in current_segment
+            ]))
+        current_segment = []
+
+    previous_elevation = None
     for path_distance, point in sample_path_points(path, ELEVATION_PROFILE_SAMPLE_INTERVAL_M):
         elevation = sampler.sample(point)
         if elevation is None:
-            if len(current_segment) >= 2:
-                profile_segments.append(build_elevation_profile_segment(current_segment))
-            current_segment = []
-        else:
-            current_segment.append((round(path_distance), point, round(elevation)))
+            close_segment()
+            previous_elevation = None
+            continue
 
-    if len(current_segment) >= 2:
-        profile_segments.append(build_elevation_profile_segment(current_segment))
+        if previous_elevation is not None:
+            elevation_delta_m = elevation - previous_elevation
+            # Ignore small changes caused by DEM noise.
+            if elevation_delta_m >= elevation_threshold_m:
+                elevation_gain_m += elevation_delta_m
+            elif elevation_delta_m <= -elevation_threshold_m:
+                elevation_loss_m -= elevation_delta_m
+        previous_elevation = elevation
+        current_segment.append((round(path_distance), point, elevation))
 
-    return {'segments': profile_segments}
+    close_segment()
+    return {
+        'elevation_gain_m': round(elevation_gain_m),
+        'elevation_loss_m': round(elevation_loss_m),
+        'profile': {'segments': profile_segments},
+    }
 
 
 class ElevationSampler:
@@ -508,28 +533,6 @@ class ElevationSampler:
 
     def close(self):
         self.tiles.clear()
-
-
-def route_elevation_change(path, sampler):
-    elevation_gain_m = 0.0
-    elevation_loss_m = 0.0
-    elevation_threshold_m = 2.0
-    previous_elevation = None
-    for point in path:
-        current_elevation = sampler.sample(point)
-        if current_elevation is None:
-            # Do not calculate a gain/loss across a gap in DEM coverage.
-            previous_elevation = None
-            continue
-        if previous_elevation is not None:
-            elevation_delta_m = current_elevation - previous_elevation
-            # Ignore small changes caused by DEM noise.
-            if elevation_delta_m >= elevation_threshold_m:
-                elevation_gain_m += elevation_delta_m
-            elif elevation_delta_m <= -elevation_threshold_m:
-                elevation_loss_m -= elevation_delta_m
-        previous_elevation = current_elevation
-    return round(elevation_gain_m), round(elevation_loss_m)
 
 
 def merge_way_groups(way_groups):
@@ -645,12 +648,14 @@ def write_route_lines(collector, exporter):
                 steps, finish_node = traversal
                 path, _ = route_graph.traversal_coordinates(start_node, steps)
                 distance_m = route_distance_m(path)
-                elevation_gain_m, elevation_loss_m = route_elevation_change(path, elevation_sampler)
-                elevation_profile = (
-                    route_elevation_profile(path, elevation_sampler)
-                    if distance_m < ELEVATION_PROFILE_MAX_DISTANCE_M
-                    else {'segments': []}
+                elevation = route_elevation(
+                    path,
+                    elevation_sampler,
+                    include_profile=distance_m < ELEVATION_PROFILE_MAX_DISTANCE_M,
                 )
+                elevation_gain_m = elevation['elevation_gain_m']
+                elevation_loss_m = elevation['elevation_loss_m']
+                elevation_profile = elevation['profile']
                 duration_min = route_duration_min(distance_m, elevation_gain_m, elevation_loss_m)
                 route_metadata.append({
                     'id': relation_id,
