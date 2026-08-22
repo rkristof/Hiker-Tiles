@@ -69,8 +69,12 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(path[-1], [0.0, 0.0])
         self.assertEqual(len(steps), 5)
 
-    def test_cycle_away_from_start_uses_open_traversal(self):
-        relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {'start': [1]}}
+    def test_cycle_away_from_start_ignores_roundtrip(self):
+        relation = {
+            'way_ids': [1, 2, 3, 4],
+            'node_roles': {'start': [1]},
+            'roundtrip': True,
+        }
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
@@ -79,7 +83,9 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
-        steps, finish = graph.shortest_traversal(1)
+        finish = graph.resolve_finish(1, {}, None)
+        self.assertIsNone(finish)
+        steps, finish = graph.shortest_traversal(1, finish)
         _, path_finish = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 2)
@@ -87,13 +93,15 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(len(steps), 4)
 
     def test_roundtrip_returns_to_start(self):
-        relation = {'way_ids': [1, 2], 'node_roles': {'start': [1]}, 'roundtrip': True}
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {'start': [1]}, 'roundtrip': True}
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
-            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
         graph = routes.RouteGraph(relation, way_nodes)
-        steps, finish = graph.shortest_traversal(1, 1)
+        finish = graph.resolve_finish(1, {}, None)
+        steps, finish = graph.shortest_traversal(1, finish)
         _, path_finish = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 1)

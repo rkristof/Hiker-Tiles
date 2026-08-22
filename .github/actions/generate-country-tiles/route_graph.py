@@ -153,7 +153,11 @@ class RouteGraph:
             if finish_node in self._graph:
                 return finish_node
             return self._snap_relation_node(finish_node, node_coordinates, sampler)
-        if self._route_relation.get('roundtrip'):
+        if (
+            self._route_relation.get('roundtrip')
+            and start_node is not None
+            and self._is_on_cycle(start_node)
+        ):
             return start_node
         return None
 
