@@ -5,16 +5,12 @@ from pathlib import Path
 
 
 try:
-    import osmium  # noqa: F401
-except ModuleNotFoundError:
-    sys.modules['osmium'] = types.SimpleNamespace(SimpleHandler=object, InvalidLocationError=Exception)
-try:
     import rasterio  # noqa: F401
 except ModuleNotFoundError:
     sys.modules['rasterio'] = types.SimpleNamespace()
 
 sys.path.insert(0, str(Path(__file__).parent))
-import extract_hiking_routes as routes
+from elevation import Elevation
 
 
 class ConstantSampler:
@@ -38,16 +34,17 @@ class SequenceSampler:
         self.sample_count = 0
 
     def sample(self, point):
-        elevation = self.elevations[self.sample_count]
+        value = self.elevations[self.sample_count]
         self.sample_count += 1
-        return elevation
+        return value
 
 
-class ExtractHikingRoutesTests(unittest.TestCase):
+class ElevationTests(unittest.TestCase):
     def test_profile_includes_off_grid_endpoint(self):
         path = [[0.0000, 0.0000], [0.0010, 0.0000]]
-        samples = routes.sample_path_points(path, 40)
-        profile = routes.route_elevation(path, ConstantSampler())['profile']
+        elevation = Elevation(sampler=ConstantSampler())
+        samples = elevation.sample_path_points(path, 40)
+        profile = elevation.route_elevation(path)['profile']
 
         self.assertEqual(len(samples), 4)
         self.assertEqual(samples[0][0], 0)
@@ -67,7 +64,8 @@ class ExtractHikingRoutesTests(unittest.TestCase):
                 return None if 0.0012 < point[0] < 0.0020 else 100
 
         path = [[0.0000, 0.0000], [0.0030, 0.0000]]
-        profile = routes.route_elevation(path, GapSampler())['profile']
+        elevation = Elevation(sampler=GapSampler())
+        profile = elevation.route_elevation(path)['profile']
 
         self.assertEqual(len(profile['segments']), 2)
         self.assertEqual(
@@ -82,22 +80,26 @@ class ExtractHikingRoutesTests(unittest.TestCase):
     def test_profile_coordinates_are_quantized_to_five_decimal_places(self):
         points = [[12.345674, 47.123454], [12.345686, 47.123466]]
 
-        encoded = routes.encode_polyline(points)
+        encoded = Elevation.encode_polyline(points)
 
         self.assertEqual(encoded, 'qxr~GmgjjACC')
 
     def test_elevation_change_uses_profile_sample_interval(self):
         path = [[index * 0.0001, 0.0] for index in range(41)]
         sampler = SpatialNoiseSampler()
-        elevation = routes.route_elevation(path, sampler)
-        self.assertEqual(sampler.sample_count, len(routes.sample_path_points(path, 40)))
+        elevation_service = Elevation(sampler=sampler)
+        elevation_service.route_elevation(path)
+        self.assertEqual(
+            sampler.sample_count,
+            len(elevation_service.sample_path_points(path, 40)),
+        )
 
     def test_elevation_change_ignores_insignificant_reversals(self):
         path = [[0.0, 0.0], [0.0018, 0.0]]
-        elevation = routes.route_elevation(
-            path,
-            SequenceSampler([100, 104, 101, 105, 102, 106, 106]),
+        elevation_service = Elevation(
+            sampler=SequenceSampler([100, 104, 101, 105, 102, 106, 106]),
         )
+        elevation = elevation_service.route_elevation(path)
 
         self.assertEqual(
             (elevation['elevation_gain_m'], elevation['elevation_loss_m']),
@@ -106,10 +108,10 @@ class ExtractHikingRoutesTests(unittest.TestCase):
 
     def test_elevation_change_preserves_significant_peak_and_valley(self):
         path = [[0.0, 0.0], [0.0018, 0.0]]
-        elevation = routes.route_elevation(
-            path,
-            SequenceSampler([100, 110, 120, 115, 105, 100, 100]),
+        elevation_service = Elevation(
+            sampler=SequenceSampler([100, 110, 120, 115, 105, 100, 100]),
         )
+        elevation = elevation_service.route_elevation(path)
 
         self.assertEqual(
             (elevation['elevation_gain_m'], elevation['elevation_loss_m']),
