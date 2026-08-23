@@ -414,6 +414,9 @@ class RouteGraph:
             if node_id != start_node and degree % 2 == 1
         )
         if not finish_candidates:
+            closed_walk = self._shortest_traversal_to(start_node, start_node)
+            if closed_walk is not None:
+                return closed_walk[0], closed_walk[2]
             return None
 
         open_walk = self._shortest_traversal_to(start_node, None, finish_candidates)
