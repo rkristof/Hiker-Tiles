@@ -227,12 +227,7 @@ class RouteGraph:
     def resolve_start(self, node_coordinates, sampler, landmarks=None):
         explicit_starts = self._route_relation.get('node_roles', {}).get('start', [])
         if explicit_starts:
-            if len(explicit_starts) != 1:
-                return None
-            start_node = explicit_starts[0]
-            if start_node in self._graph:
-                return start_node
-            return self._snap_relation_node(start_node, node_coordinates, sampler)
+            return self._resolve_explicit_node(explicit_starts, node_coordinates, sampler)
 
         leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
@@ -265,9 +260,11 @@ class RouteGraph:
     def _resolve_landmark_start(self, landmark_index):
         if landmark_index is None or self._graph.number_of_nodes() == 0:
             return None
-        route_tokens = self._text_tokens(
-            self._route_relation.get('name', ''),
-            self._route_relation.get('name_int', ''),
+        route_tokens = set(
+            self._text_token_list(
+                self._route_relation.get('name', ''),
+                self._route_relation.get('name_int', ''),
+            )
         )
         nearest_by_landmark = {}
         for node_id, graph_attributes in self._graph.nodes(data=True):
@@ -285,13 +282,14 @@ class RouteGraph:
         candidates = []
         for landmark_index_value, (distance_m, node_id) in nearest_by_landmark.items():
             landmark = landmark_index.landmark(landmark_index_value)
-            name_match_count = len(
-                route_tokens & self._text_tokens(
+            landmark_tokens = set(
+                self._text_token_list(
                     landmark.get('name', ''),
                     landmark.get('description', ''),
                     landmark.get('ref', ''),
                 )
             )
+            name_match_count = len(route_tokens & landmark_tokens)
             candidates.append({
                 'node_id': node_id,
                 'distance_m': distance_m,
@@ -312,14 +310,13 @@ class RouteGraph:
         ))
         return candidates[0]['node_id']
 
-    @staticmethod
-    def _text_tokens(*values):
-        return {
-            token.casefold()
-            for value in values
-            for token in re.findall(r'\w+', value, flags=re.UNICODE)
-            if len(token) >= 3
-        }
+    def _resolve_explicit_node(self, explicit_nodes, node_coordinates, sampler):
+        if len(explicit_nodes) != 1:
+            return None
+        node_id = explicit_nodes[0]
+        if node_id in self._graph:
+            return node_id
+        return self._snap_relation_node(node_id, node_coordinates, sampler)
 
     def _two_endpoint_pair(self):
         leaves = set(self._graph_endpoints(set(self._graph.nodes)))
@@ -386,12 +383,7 @@ class RouteGraph:
     def resolve_finish(self, start_node, node_coordinates, sampler):
         explicit_finishes = self._route_relation.get('node_roles', {}).get('end', [])
         if explicit_finishes:
-            if len(explicit_finishes) != 1:
-                return None
-            finish_node = explicit_finishes[0]
-            if finish_node in self._graph:
-                return finish_node
-            return self._snap_relation_node(finish_node, node_coordinates, sampler)
+            return self._resolve_explicit_node(explicit_finishes, node_coordinates, sampler)
         endpoint_pair = self._two_endpoint_pair()
         if endpoint_pair is not None and start_node in endpoint_pair:
             return endpoint_pair[1] if start_node == endpoint_pair[0] else endpoint_pair[0]
