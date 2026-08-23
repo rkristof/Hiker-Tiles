@@ -4,7 +4,7 @@ import os
 import osmium
 
 from elevation import Elevation
-from route_graph import RouteGraph, landmark_candidate, polyline_distance_m
+from route_graph import LandmarkIndex, RouteGraph, landmark_candidate, polyline_distance_m
 
 
 NETWORK_GROUP_BY_TAG = {
@@ -248,6 +248,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.node_way_ids = {}  # node_id -> route way IDs, shared across relations
         self.node_coordinates = {}  # node_id -> coordinates for relation endpoint markers
         self.landmarks = []  # candidate landmarks used only by relations without starts
+        self.landmark_index = None
 
     def node(self, node):
         try:
@@ -273,23 +274,22 @@ class GeoJSONExporter(osmium.SimpleHandler):
 
     def way(self, way):
         route_attributes = self.way_routes.get(way.id)
+        landmark = None
         if self.collect_landmarks:
-            try:
-                landmark_points = [[node.lon, node.lat] for node in way.nodes]
-            except osmium.InvalidLocationError:
-                landmark_points = []
             landmark = landmark_candidate({tag.k: tag.v for tag in way.tags})
-            if landmark is not None and landmark_points:
-                landmark['way_id'] = way.id
-                landmark['points'] = landmark_points
-                self.landmarks.append(landmark)
-        if not route_attributes:
+        if not route_attributes and landmark is None:
             return
         try:
             nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
         except osmium.InvalidLocationError:
             return
         if len(nodes) < 2:
+            return
+        if landmark is not None:
+            landmark['way_id'] = way.id
+            landmark['points'] = [point for _, point in nodes]
+            self.landmarks.append(landmark)
+        if not route_attributes:
             return
         coordinates = [point for _, point in nodes]
         self.way_nodes[way.id] = nodes
@@ -450,6 +450,7 @@ def export_route_features(collector):
         )
         exporter = GeoJSONExporter(collector.way_routes,points_file,collect_landmarks)
         exporter.apply_file('tiles-filtered.osm.pbf', locations=True)
+        exporter.landmark_index = LandmarkIndex(exporter.landmarks) if collect_landmarks else None
         print(f'Route ways matched: {exporter.way_count}')
         print(f'Natural points written: {exporter.point_count}')
     write_route_layers(exporter)
@@ -468,8 +469,8 @@ def write_route_lines(collector, exporter):
                     continue
 
                 route_graph.repair_disconnected_components(elevation)
-                landmarks = exporter.landmarks if route_relation['needs_landmark_start'] else ()
-                start_node = route_graph.resolve_start(exporter.node_coordinates, elevation, landmarks)
+                landmark_index = exporter.landmark_index if route_relation['needs_landmark_start'] else None
+                start_node = route_graph.resolve_start(exporter.node_coordinates, elevation, landmark_index)
                 finish_node = route_graph.resolve_finish(start_node, exporter.node_coordinates, elevation)
                 explicit_finish = bool(route_relation.get('node_roles', {}).get('end'))
                 lower_bound_distance_m = route_graph.required_distance_m()

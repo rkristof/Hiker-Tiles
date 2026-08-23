@@ -28,6 +28,8 @@ LANDMARK_RULES = (
     ('railway', 'halt', LandmarkCategory.MEDIUM, 90),
     ('aerialway', 'station', LandmarkCategory.MEDIUM, 90),
 )
+LANDMARK_MAX_DISTANCE_M = max(rule[3] for rule in LANDMARK_RULES)
+LANDMARK_GRID_SIZE_DEGREES = 0.0005
 
 
 def landmark_candidate(tags):
@@ -44,6 +46,55 @@ def landmark_candidate(tags):
                 'ref': tags.get('ref', ''),
             }
     return None
+
+
+class LandmarkIndex:
+    """Index landmark points so route start resolution only checks nearby candidates."""
+
+    def __init__(self, landmarks):
+        self._landmarks = tuple(landmarks)
+        self._cells = {}
+        for landmark_index, landmark in enumerate(self._landmarks):
+            for point in self._landmark_points(landmark):
+                cell = self._cell(point)
+                self._cells.setdefault(cell, []).append((landmark_index, point))
+
+    def nearby(self, point):
+        """Yield indexed landmark points within the maximum category distance window."""
+        latitude_radius = math.degrees(LANDMARK_MAX_DISTANCE_M / 6371000)
+        longitude_radius = latitude_radius / max(math.cos(math.radians(point[1])), 1e-6)
+        latitude_cell = self._cell(point)[0]
+        longitude_cell = self._cell(point)[1]
+        latitude_range = range(
+            latitude_cell - math.ceil(latitude_radius / LANDMARK_GRID_SIZE_DEGREES),
+            latitude_cell + math.ceil(latitude_radius / LANDMARK_GRID_SIZE_DEGREES) + 1,
+        )
+        longitude_range = range(
+            longitude_cell - math.ceil(longitude_radius / LANDMARK_GRID_SIZE_DEGREES),
+            longitude_cell + math.ceil(longitude_radius / LANDMARK_GRID_SIZE_DEGREES) + 1,
+        )
+        for latitude_index in latitude_range:
+            for longitude_index in longitude_range:
+                yield from self._cells.get((latitude_index, longitude_index), ())
+
+    def landmark(self, landmark_index):
+        """Return the landmark stored at an index position."""
+        return self._landmarks[landmark_index]
+
+    @staticmethod
+    def _cell(point):
+        return (
+            math.floor(point[1] / LANDMARK_GRID_SIZE_DEGREES),
+            math.floor(point[0] / LANDMARK_GRID_SIZE_DEGREES),
+        )
+
+    @staticmethod
+    def _landmark_points(landmark):
+        points = landmark.get('points', [])
+        if points:
+            return points
+        point = landmark.get('point')
+        return [point] if point is not None else []
 
 
 class RouteGraph:
@@ -185,7 +236,10 @@ class RouteGraph:
         leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
             return leaves[0]
-        landmark_start = self._resolve_landmark_start(landmarks or ())
+        landmark_index = landmarks
+        if landmark_index is not None and not isinstance(landmark_index, LandmarkIndex):
+            landmark_index = LandmarkIndex(landmark_index)
+        landmark_start = self._resolve_landmark_start(landmark_index)
         if landmark_start is not None:
             return landmark_start
         if leaves:
@@ -204,30 +258,29 @@ class RouteGraph:
                     )
         return next(iter(self._graph), None)
 
-    def _resolve_landmark_start(self, landmarks):
+    def _resolve_landmark_start(self, landmark_index):
+        if landmark_index is None or self._graph.number_of_nodes() == 0:
+            return None
         route_tokens = self._text_tokens(
             self._route_relation.get('name', ''),
             self._route_relation.get('name_int', ''),
         )
+        nearest_by_landmark = {}
+        for node_id, graph_attributes in self._graph.nodes(data=True):
+            graph_point = graph_attributes['point']
+            for landmark_index_value, landmark_point in landmark_index.nearby(graph_point):
+                landmark = landmark_index.landmark(landmark_index_value)
+                distance_m = haversine_distance_m(landmark_point, graph_point)
+                if distance_m > landmark.get('distance_limit_m', 0):
+                    continue
+                nearest = nearest_by_landmark.get(landmark_index_value)
+                candidate = (distance_m, node_id)
+                if nearest is None or candidate < nearest:
+                    nearest_by_landmark[landmark_index_value] = candidate
+
         candidates = []
-        for landmark in landmarks:
-            points = landmark.get('points', [])
-            if not points:
-                point = landmark.get('point')
-                points = [point] if point is not None else []
-            if not points or self._graph.number_of_nodes() == 0:
-                continue
-            nearest = min(
-                (
-                    haversine_distance_m(landmark_point, graph_attributes['point']),
-                    node_id,
-                )
-                for landmark_point in points
-                for node_id, graph_attributes in self._graph.nodes(data=True)
-            )
-            distance_m, node_id = nearest
-            if distance_m > landmark.get('distance_limit_m', 0):
-                continue
+        for landmark_index_value, (distance_m, node_id) in nearest_by_landmark.items():
+            landmark = landmark_index.landmark(landmark_index_value)
             name_match_count = len(
                 route_tokens & self._text_tokens(
                     landmark.get('name', ''),

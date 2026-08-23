@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import types
@@ -17,7 +18,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 import extract_hiking_routes as routes
-from route_graph import LandmarkCategory, landmark_candidate
+from route_graph import LandmarkCategory, LandmarkIndex, landmark_candidate
 
 
 class ConstantSampler:
@@ -71,6 +72,20 @@ class RouteGraphTests(unittest.TestCase):
         self.assertTrue(collector.relations[1]['needs_landmark_start'])
         self.assertFalse(collector.relations[2]['needs_landmark_start'])
 
+    def test_landmark_collection_skips_irrelevant_way_geometry(self):
+        class Way:
+            id = 10
+            tags = []
+
+            @property
+            def nodes(self):
+                raise AssertionError('irrelevant way geometry was accessed')
+
+        exporter = routes.GeoJSONExporter({}, io.StringIO(), collect_landmarks=True)
+        exporter.way(Way())
+
+        self.assertEqual(exporter.landmarks, [])
+
     def test_landmark_start_matches_existing_graph_node(self):
         relation = {
             'name': 'Gyadai tanösvény',
@@ -97,6 +112,17 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(start, 2)
         self.assertIn(start, graph._graph)
+
+    def test_landmark_index_returns_only_nearby_points(self):
+        index = LandmarkIndex([
+            {'points': [[0.0000, 0.0000]], 'distance_limit_m': 30},
+            {'points': [[0.0100, 0.0000]], 'distance_limit_m': 30},
+        ])
+
+        nearby = list(index.nearby([0.0001, 0.0000]))
+
+        self.assertEqual(len(nearby), 1)
+        self.assertEqual(nearby[0][0], 0)
 
     def test_landmark_distance_limit_is_enforced(self):
         relation = {
@@ -182,7 +208,7 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
-        start = graph.resolve_start({}, None)
+        start = graph.resolve_start({}, None, ())
 
         self.assertEqual(start, 1)
         self.assertEqual(graph._graph.degree(start), 1)
