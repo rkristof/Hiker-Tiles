@@ -105,6 +105,7 @@ class RouteGraph:
         self._node_way_ids = node_way_ids
         self._graph = nx.MultiGraph()
         self._simple_graph = None
+        self._relation_way_endpoints = []
         self._build(way_nodes)
 
     @property
@@ -236,6 +237,9 @@ class RouteGraph:
         leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
             return leaves[0]
+        endpoint_pair = self._two_endpoint_pair()
+        if endpoint_pair is not None:
+            return endpoint_pair[0]
         landmark_index = landmarks
         if landmark_index is not None and not isinstance(landmark_index, LandmarkIndex):
             landmark_index = LandmarkIndex(landmark_index)
@@ -317,6 +321,68 @@ class RouteGraph:
             if len(token) >= 3
         }
 
+    def _two_endpoint_pair(self):
+        leaves = set(self._graph_endpoints(set(self._graph.nodes)))
+        if len(leaves) != 2:
+            return None
+
+        ordered_nodes = [
+            node_id
+            for first_node, last_node in self._relation_way_endpoints
+            for node_id in (first_node, last_node)
+        ]
+        first_endpoint = next((node_id for node_id in ordered_nodes if node_id in leaves), None)
+        last_endpoint = next((node_id for node_id in reversed(ordered_nodes) if node_id in leaves), None)
+        if first_endpoint is None or last_endpoint is None or first_endpoint == last_endpoint:
+            return tuple(sorted(leaves))
+
+        if self._from_to_reverses_member_order():
+            return last_endpoint, first_endpoint
+        return first_endpoint, last_endpoint
+
+    def _from_to_reverses_member_order(self):
+        from_name = self._route_relation.get('from', '')
+        to_name = self._route_relation.get('to', '')
+        if not from_name or not to_name:
+            return False
+
+        route_tokens = self._text_token_list(
+            self._route_relation.get('name', ''),
+            self._route_relation.get('name_int', ''),
+        )
+        from_position = self._find_token_sequence(
+            route_tokens,
+            self._text_token_list(from_name),
+        )
+        to_position = self._find_token_sequence(
+            route_tokens,
+            self._text_token_list(to_name),
+        )
+        return (
+            from_position is not None
+            and to_position is not None
+            and from_position > to_position
+        )
+
+    @staticmethod
+    def _text_token_list(*values):
+        return [
+            token.casefold()
+            for value in values
+            for token in re.findall(r'\w+', value, flags=re.UNICODE)
+            if len(token) >= 3
+        ]
+
+    @staticmethod
+    def _find_token_sequence(tokens, sequence):
+        if not sequence or len(sequence) > len(tokens):
+            return None
+        sequence_length = len(sequence)
+        for index in range(len(tokens) - sequence_length + 1):
+            if tokens[index:index + sequence_length] == sequence:
+                return index
+        return None
+
     def resolve_finish(self, start_node, node_coordinates, sampler):
         explicit_finishes = self._route_relation.get('node_roles', {}).get('end', [])
         if explicit_finishes:
@@ -326,6 +392,9 @@ class RouteGraph:
             if finish_node in self._graph:
                 return finish_node
             return self._snap_relation_node(finish_node, node_coordinates, sampler)
+        endpoint_pair = self._two_endpoint_pair()
+        if endpoint_pair is not None and start_node in endpoint_pair:
+            return endpoint_pair[1] if start_node == endpoint_pair[0] else endpoint_pair[0]
         if (
             self._route_relation.get('roundtrip')
             and start_node is not None
@@ -381,6 +450,11 @@ class RouteGraph:
         relation_way_nodes = [
             (way_id, way_nodes.get(way_id, []))
             for way_id in self._route_relation['way_ids']
+        ]
+        self._relation_way_endpoints = [
+            (nodes[0][0], nodes[-1][0])
+            for _, nodes in relation_way_nodes
+            if len(nodes) >= 2
         ]
         if self._node_way_ids is None:
             node_way_ids = {}

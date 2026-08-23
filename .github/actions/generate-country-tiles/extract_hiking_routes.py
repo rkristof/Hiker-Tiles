@@ -104,6 +104,8 @@ class WayRouteCollector(osmium.SimpleHandler):
             **route_attributes,
             'way_ids': [member.ref for member in relation.members if member.type == 'w'],
             'node_roles': node_roles,
+            'from': tags.get('from', '').strip(),
+            'to': tags.get('to', '').strip(),
             'roundtrip': tags.get('roundtrip', '').strip().lower() == 'yes',
             'needs_landmark_start': not bool(node_roles.get('start')),
         }

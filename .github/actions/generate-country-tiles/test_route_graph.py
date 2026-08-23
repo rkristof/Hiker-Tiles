@@ -59,18 +59,24 @@ class RouteGraphTests(unittest.TestCase):
                 self.role = role
 
         class Relation:
-            def __init__(self, relation_id, members):
+            def __init__(self, relation_id, members, tags=None):
                 self.id = relation_id
                 self.members = members
-                self.tags = [Tag('type', 'route'), Tag('route', 'hiking')]
+                self.tags = tags or [Tag('type', 'route'), Tag('route', 'hiking')]
 
         collector = routes.WayRouteCollector()
         with patch.dict(os.environ, {'COUNTRY': 'hungary', 'SYMBOL_TAG': 'osmc:symbol'}):
             collector.relation(Relation(1, [Member('w', 10)]))
-            collector.relation(Relation(2, [Member('n', 20, 'start'), Member('w', 11)]))
+            collector.relation(Relation(
+                2,
+                [Member('n', 20, 'start'), Member('w', 11)],
+                [Tag('type', 'route'), Tag('route', 'hiking'), Tag('from', 'A'), Tag('to', 'B')],
+            ))
 
         self.assertTrue(collector.relations[1]['needs_landmark_start'])
         self.assertFalse(collector.relations[2]['needs_landmark_start'])
+        self.assertEqual(collector.relations[2]['from'], 'A')
+        self.assertEqual(collector.relations[2]['to'], 'B')
 
     def test_landmark_collection_skips_irrelevant_way_geometry(self):
         class Way:
@@ -149,11 +155,12 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(start, 1)
 
-    def test_landmark_start_precedes_multiple_leaf_fallback(self):
+    def test_two_endpoints_ignore_landmarks_and_choose_member_order(self):
         relation = {
             'name': 'Route',
-            'way_ids': [1, 2, 3],
+            'way_ids': [3, 2, 1],
             'node_roles': {},
+            'roundtrip': True,
         }
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
@@ -172,7 +179,31 @@ class RouteGraphTests(unittest.TestCase):
             }],
         )
 
+        finish = graph.resolve_finish(start, {}, None)
+
         self.assertEqual(start, 4)
+        self.assertEqual(finish, 1)
+
+    def test_two_endpoints_reverse_member_order_when_from_follows_to_in_name(self):
+        relation = {
+            'name': 'Finish - Start',
+            'from': 'Start',
+            'to': 'Finish',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            3: [(3, [0.0020, 0.0000]), (4, [0.0030, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start({}, None, ())
+        finish = graph.resolve_finish(start, {}, None)
+
+        self.assertEqual(start, 4)
+        self.assertEqual(finish, 1)
 
     def test_explicit_start_ignores_landmarks(self):
         relation = {
