@@ -506,13 +506,14 @@ class RouteGraph:
         return [node_id for node_id in component if simple_graph.degree(node_id) == 1]
 
     def _is_on_cycle(self, node_id):
+        simple_graph = self._simple_weighted_graph()
         bridge_edges = {
             frozenset((first_node, second_node))
-            for first_node, second_node in nx.bridges(self._graph)
+            for first_node, second_node in nx.bridges(simple_graph)
         }
         return any(
             frozenset((node_id, neighbor)) not in bridge_edges
-            for neighbor in self._graph.neighbors(node_id)
+            for neighbor in simple_graph.neighbors(node_id)
         )
 
     def _snap_relation_node(self, relation_node_id, node_coordinates, sampler):

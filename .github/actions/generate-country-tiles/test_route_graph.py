@@ -282,23 +282,30 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(path[-1], [0.0, 0.0])
         self.assertEqual(len(steps), 5)
 
-    def test_retraced_leaf_on_cycle_is_used_as_roundtrip_start(self):
-        relation = {'way_ids': [2, 3, 4, 1, 1], 'node_roles': {}}
+    def test_retraced_leaf_does_not_create_roundtrip_cycle(self):
+        relation = {
+            'way_ids': [2, 3, 4, 1, 1, 5, 6, 6],
+            'node_roles': {},
+            'roundtrip': True,
+        }
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (4, [0.0000, 0.0010])],
             4: [(4, [0.0000, 0.0010]), (2, [0.0010, 0.0000])],
+            5: [(3, [0.0010, 0.0010]), (5, [0.0020, 0.0010])],
+            6: [(2, [0.0010, 0.0000]), (6, [0.0020, 0.0000])],
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
         start = graph.resolve_start({}, None, ())
+        self.assertIsNone(graph.resolve_finish(start, {}, None))
         steps, finish = graph.shortest_traversal(start)
         _, path_finish = graph.traversal_coordinates(start, steps)
 
         self.assertEqual(start, 1)
-        self.assertEqual(finish, 1)
-        self.assertEqual(path_finish, 1)
+        self.assertEqual(finish, 5)
+        self.assertEqual(path_finish, 5)
 
     def test_cycle_away_from_start_ignores_roundtrip(self):
         relation = {
