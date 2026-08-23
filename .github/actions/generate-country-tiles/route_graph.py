@@ -1,6 +1,49 @@
 import math
+import re
+from enum import IntEnum
 
 import networkx as nx
+
+
+class LandmarkCategory(IntEnum):
+    MEDIUM = 1
+    HIGH = 2
+    HIGHEST = 3
+
+
+LANDMARK_RULES = (
+    ('highway', 'trailhead', LandmarkCategory.HIGHEST, 30),
+    ('information', 'guidepost', LandmarkCategory.HIGHEST, 30),
+    ('information', 'map', LandmarkCategory.HIGHEST, 30),
+    ('information', 'board', LandmarkCategory.HIGHEST, 30),
+    ('tourism', 'information', LandmarkCategory.HIGHEST, 30),
+    ('parking', 'entrance', LandmarkCategory.HIGH, 30),
+    ('entrance', 'main', LandmarkCategory.HIGH, 30),
+    ('amenity', 'parking', LandmarkCategory.HIGH, 60),
+    ('tourism', 'visitor_centre', LandmarkCategory.HIGH, 60),
+    ('highway', 'bus_stop', LandmarkCategory.MEDIUM, 90),
+    ('public_transport', 'platform', LandmarkCategory.MEDIUM, 90),
+    ('public_transport', 'stop_position', LandmarkCategory.MEDIUM, 90),
+    ('railway', 'station', LandmarkCategory.MEDIUM, 90),
+    ('railway', 'halt', LandmarkCategory.MEDIUM, 90),
+    ('aerialway', 'station', LandmarkCategory.MEDIUM, 90),
+)
+
+
+def landmark_candidate(tags):
+    """Return selected metadata for a high-signal OSM landmark, if applicable."""
+    for key, value, category, distance_limit_m in LANDMARK_RULES:
+        if tags.get(key) == value:
+            return {
+                'category': category,
+                'distance_limit_m': distance_limit_m,
+                'tag_key': key,
+                'tag_value': value,
+                'name': tags.get('name', ''),
+                'description': tags.get('description', ''),
+                'ref': tags.get('ref', ''),
+            }
+    return None
 
 
 class RouteGraph:
@@ -129,7 +172,7 @@ class RouteGraph:
             component_parent[second_component] = first_component
             repairs += 1
 
-    def resolve_start(self, node_coordinates, sampler):
+    def resolve_start(self, node_coordinates, sampler, landmarks=None):
         explicit_starts = self._route_relation.get('node_roles', {}).get('start', [])
         if explicit_starts:
             if len(explicit_starts) != 1:
@@ -142,6 +185,9 @@ class RouteGraph:
         leaves = self._graph_endpoints(set(self._graph.nodes))
         if len(leaves) == 1:
             return leaves[0]
+        landmark_start = self._resolve_landmark_start(landmarks or ())
+        if landmark_start is not None:
+            return landmark_start
         if leaves:
             anchor_node = next(iter(self._graph), None)
             if anchor_node is not None:
@@ -157,6 +203,66 @@ class RouteGraph:
                         key=lambda leaf: (distances[leaf], leaf),
                     )
         return next(iter(self._graph), None)
+
+    def _resolve_landmark_start(self, landmarks):
+        route_tokens = self._text_tokens(
+            self._route_relation.get('name', ''),
+            self._route_relation.get('name_int', ''),
+        )
+        candidates = []
+        for landmark in landmarks:
+            points = landmark.get('points', [])
+            if not points:
+                point = landmark.get('point')
+                points = [point] if point is not None else []
+            if not points or self._graph.number_of_nodes() == 0:
+                continue
+            nearest = min(
+                (
+                    haversine_distance_m(landmark_point, graph_attributes['point']),
+                    node_id,
+                )
+                for landmark_point in points
+                for node_id, graph_attributes in self._graph.nodes(data=True)
+            )
+            distance_m, node_id = nearest
+            if distance_m > landmark.get('distance_limit_m', 0):
+                continue
+            name_match_count = len(
+                route_tokens & self._text_tokens(
+                    landmark.get('name', ''),
+                    landmark.get('description', ''),
+                    landmark.get('ref', ''),
+                )
+            )
+            candidates.append({
+                'node_id': node_id,
+                'distance_m': distance_m,
+                'category': landmark.get('category'),
+                'name_match_count': name_match_count if name_match_count >= 2 else 0,
+                'landmark_id': landmark.get('node_id', landmark.get('way_id', 0)),
+            })
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda candidate: (
+            -bool(candidate['name_match_count']),
+            -candidate['category'],
+            -candidate['name_match_count'],
+            candidate['distance_m'],
+            candidate['node_id'],
+            candidate['landmark_id'],
+        ))
+        return candidates[0]['node_id']
+
+    @staticmethod
+    def _text_tokens(*values):
+        return {
+            token.casefold()
+            for value in values
+            for token in re.findall(r'\w+', value, flags=re.UNICODE)
+            if len(token) >= 3
+        }
 
     def resolve_finish(self, start_node, node_coordinates, sampler):
         explicit_finishes = self._route_relation.get('node_roles', {}).get('end', [])

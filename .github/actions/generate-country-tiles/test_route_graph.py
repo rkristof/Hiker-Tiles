@@ -1,7 +1,9 @@
+import os
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 try:
@@ -15,6 +17,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 import extract_hiking_routes as routes
+from route_graph import LandmarkCategory, landmark_candidate
 
 
 class ConstantSampler:
@@ -31,6 +34,145 @@ class SteepSampler:
 
 
 class RouteGraphTests(unittest.TestCase):
+    def test_landmark_categories_use_distance_tiers(self):
+        highest = landmark_candidate({'information': 'guidepost'})
+        direct_access = landmark_candidate({'amenity': 'parking'})
+        transport_access = landmark_candidate({'highway': 'bus_stop'})
+
+        self.assertEqual((highest['category'], highest['distance_limit_m']), (LandmarkCategory.HIGHEST, 30))
+        self.assertEqual((direct_access['category'], direct_access['distance_limit_m']), (LandmarkCategory.HIGH, 60))
+        self.assertEqual((transport_access['category'], transport_access['distance_limit_m']), (LandmarkCategory.MEDIUM, 90))
+        self.assertGreater(LandmarkCategory.HIGHEST, LandmarkCategory.HIGH)
+        self.assertGreater(LandmarkCategory.HIGH, LandmarkCategory.MEDIUM)
+
+    def test_landmark_collection_only_targets_relations_without_start(self):
+        class Tag:
+            def __init__(self, key, value):
+                self.k = key
+                self.v = value
+
+        class Member:
+            def __init__(self, member_type, reference, role=''):
+                self.type = member_type
+                self.ref = reference
+                self.role = role
+
+        class Relation:
+            def __init__(self, relation_id, members):
+                self.id = relation_id
+                self.members = members
+                self.tags = [Tag('type', 'route'), Tag('route', 'hiking')]
+
+        collector = routes.WayRouteCollector()
+        with patch.dict(os.environ, {'COUNTRY': 'hungary', 'SYMBOL_TAG': 'osmc:symbol'}):
+            collector.relation(Relation(1, [Member('w', 10)]))
+            collector.relation(Relation(2, [Member('n', 20, 'start'), Member('w', 11)]))
+
+        self.assertTrue(collector.relations[1]['needs_landmark_start'])
+        self.assertFalse(collector.relations[2]['needs_landmark_start'])
+
+    def test_landmark_start_matches_existing_graph_node(self):
+        relation = {
+            'name': 'Gyadai tanösvény',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [{
+                'category': LandmarkCategory.HIGH,
+                'distance_limit_m': 60,
+                'name': 'Gyadai tanösvény kezdőpontja',
+                'points': [[0.0010, 0.0000]],
+            }],
+        )
+
+        self.assertEqual(start, 2)
+        self.assertIn(start, graph._graph)
+
+    def test_landmark_distance_limit_is_enforced(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [{
+                'category': LandmarkCategory.HIGHEST,
+                'distance_limit_m': 30,
+                'points': [[0.00128, 0.0000]],
+            }],
+        )
+
+        self.assertEqual(start, 1)
+
+    def test_landmark_start_precedes_multiple_leaf_fallback(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            3: [(3, [0.0020, 0.0000]), (4, [0.0030, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [{
+                'category': LandmarkCategory.HIGHEST,
+                'distance_limit_m': 30,
+                'points': [[0.0030, 0.0000]],
+            }],
+        )
+
+        self.assertEqual(start, 4)
+
+    def test_explicit_start_ignores_landmarks(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {'start': [1]},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [{
+                'category': LandmarkCategory.HIGHEST,
+                'distance_limit_m': 30,
+                'points': [[0.0010, 0.0000]],
+            }],
+        )
+
+        self.assertEqual(start, 1)
+
     def test_missing_start_uses_closest_endpoint(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
         way_nodes = {

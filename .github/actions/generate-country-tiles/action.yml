@@ -66,13 +66,20 @@ runs:
         COUNTRY: ${{ inputs.country }}
         SYMBOL_TAG: ${{ inputs.symbol_tag }}
       run: |
-        # Pre-filter the full PBF to only hiking route relations (+ their referenced
-        # ways and nodes) and natural point nodes. This shrinks the input from the full
-        # country extract to a fraction of that, making both Python passes fast.
+        # Pre-filter the full PBF to route relations (+ their referenced ways and nodes),
+        # start landmarks, and natural point nodes. This keeps both Python passes fast.
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
-          n/natural=peak n/natural=cave_entrance n/natural=volcano \
           n/checkpoint=hiking \
+          n/highway=trailhead n/information=guidepost n/information=map \
+          n/information=board n/tourism=information n/parking=entrance \
+          n/entrance=main n/amenity=parking n/tourism=visitor_centre \
+          n/highway=bus_stop n/public_transport=platform \
+          n/public_transport=stop_position n/railway=station n/railway=halt \
+          n/aerialway=station \
+          w/parking=entrance w/entrance=main w/amenity=parking \
+          w/tourism=visitor_centre \
+          n/natural=peak n/natural=cave_entrance n/natural=volcano \
           -o tiles-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
         python3 .github/actions/generate-country-tiles/extract_hiking_routes.py
