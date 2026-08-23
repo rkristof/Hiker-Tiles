@@ -510,7 +510,8 @@ class RouteGraph:
         )
 
     def _graph_endpoints(self, component):
-        return [node_id for node_id in component if self._graph.degree(node_id) == 1]
+        simple_graph = self._simple_weighted_graph()
+        return [node_id for node_id in component if simple_graph.degree(node_id) == 1]
 
     def _is_on_cycle(self, node_id):
         bridge_edges = {
