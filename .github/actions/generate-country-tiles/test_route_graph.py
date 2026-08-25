@@ -626,6 +626,19 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(start, 2)
 
+    # Regression routes included in the fixture (relation ID: name):
+    # - 1524566: ZT, Gyadai tanösvény
+    # - 2499633: S↺, Thirring körút (Dobogókő, elágazás – Thirring-sziklák – Dobogókő, elágazás)
+    # - 14643735: Rám-szakadék tanösvény (Dömös - Rám-szakadék - Dömös)
+    # - 4120196: Oszoly-ösvény (Csobánka, Oszoly-pihenő – Oszoly-csúcs)
+    # - 5845823: KT, Kékkő tanösvény
+    # - 10093867: Hajta természetismereti túra
+    # - 3219501: K▲ (Kékestető – Mátrafüred)
+    # - 8911845: ZΩ (Szalajka-völgy - Istállós-kői barlang)
+    # - 3466700: S, Baradla tanösvény
+    # - 2146970: Z (Tihany, apátsági templom – Tihany, rév)
+    # - 16122238: ST209 Esztergom - Dobogókő
+    # - 4111515: Mária-út, M02-27A (Esztergom – Dobogókő)
     def test_hungary_routes_preserve_pbf_derived_results(self):
         sampler = ConstantSampler()
 
