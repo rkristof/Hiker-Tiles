@@ -475,15 +475,12 @@ def write_route_lines(collector, exporter):
                 start_node = route_graph.resolve_start(exporter.node_coordinates, elevation, landmark_index)
                 finish_node = route_graph.resolve_finish(start_node, exporter.node_coordinates, elevation)
                 explicit_finish = bool(route_relation.get('node_roles', {}).get('end'))
-                lower_bound_distance_m = route_graph.required_distance_m()
 
                 if route_graph.component_count > 1:
                     continue
                 if start_node is None:
                     continue
                 if explicit_finish and finish_node is None:
-                    continue
-                if lower_bound_distance_m >= Elevation.PROFILE_MAX_DISTANCE_M:
                     continue
 
                 traversal = route_graph.shortest_traversal(start_node, finish_node)
@@ -493,10 +490,17 @@ def write_route_lines(collector, exporter):
                 steps, finish_node = traversal
                 path, _ = route_graph.traversal_coordinates(start_node, steps)
                 distance_m = route_distance_m(path)
-                elevation_data = elevation.route_elevation(
-                    path,
-                    include_profile=distance_m < Elevation.PROFILE_MAX_DISTANCE_M,
-                )
+                if distance_m > Elevation.PROFILE_MAX_DISTANCE_M:
+                    elevation_data = {
+                        'elevation_gain_m': 0,
+                        'elevation_loss_m': 0,
+                        'profile': {'segments': []},
+                    }
+                else:
+                    elevation_data = elevation.route_elevation(
+                        path,
+                        include_profile=distance_m < Elevation.PROFILE_MAX_DISTANCE_M,
+                    )
                 elevation_gain_m = elevation_data['elevation_gain_m']
                 elevation_loss_m = elevation_data['elevation_loss_m']
                 elevation_profile = elevation_data['profile']
