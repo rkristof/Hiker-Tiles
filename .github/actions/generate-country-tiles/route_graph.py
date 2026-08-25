@@ -416,6 +416,8 @@ class RouteGraph:
         explicit_finishes = self._route_relation.get('node_roles', {}).get('end', [])
         if explicit_finishes:
             return self._resolve_explicit_node(explicit_finishes, node_coordinates, sampler)
+        if self._graph.number_of_edges() > 0 and nx.is_eulerian(self._graph):
+            return None
         endpoint_pair = self._two_endpoint_pair()
         if endpoint_pair is not None and start_node in endpoint_pair:
             return endpoint_pair[1] if start_node == endpoint_pair[0] else endpoint_pair[0]

@@ -639,6 +639,7 @@ class RouteGraphTests(unittest.TestCase):
     # - 2146970: Z (Tihany, apátsági templom – Tihany, rév)
     # - 16122238: ST209 Esztergom - Dobogókő
     # - 4111515: Mária-út, M02-27A (Esztergom – Dobogókő)
+    # - 11134335: Sóvirág tanösvény (two-way circular relation)
     def test_hungary_routes_preserve_pbf_derived_results(self):
         sampler = ConstantSampler()
 
