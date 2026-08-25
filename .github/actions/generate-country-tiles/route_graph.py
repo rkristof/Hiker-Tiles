@@ -116,6 +116,38 @@ class RouteGraph:
     def component_count(self):
         return nx.number_connected_components(self._graph)
 
+    @property
+    def has_explicit_finish(self):
+        return bool(self._route_relation.get('node_roles', {}).get('end'))
+
+    def component_graphs(self):
+        """Return independent graph views for each connected component."""
+        components = sorted(
+            nx.connected_components(self._graph),
+            key=lambda component: min(component),
+        )
+        component_graphs = []
+        for component in components:
+            component_relation = {
+                **self._route_relation,
+                'node_roles': {
+                    role: [node_id for node_id in node_ids if node_id in component]
+                    for role, node_ids in self._route_relation.get('node_roles', {}).items()
+                },
+            }
+            component_graph = object.__new__(RouteGraph)
+            component_graph._route_relation = component_relation
+            component_graph._node_way_ids = self._node_way_ids
+            component_graph._graph = self._graph.subgraph(component).copy()
+            component_graph._simple_graph = None
+            component_graph._relation_way_endpoints = [
+                endpoints
+                for endpoints in self._relation_way_endpoints
+                if endpoints[0] in component and endpoints[1] in component
+            ]
+            component_graphs.append(component_graph)
+        return component_graphs
+
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
 

@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -41,6 +42,174 @@ def load_route_regression_cases():
 
 
 class RouteGraphTests(unittest.TestCase):
+    def test_component_graphs_preserve_disconnected_components(self):
+        relation = {'way_ids': [1, 2], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(3, [1.0000, 0.0000]), (4, [1.0010, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        components = graph.component_graphs()
+
+        self.assertEqual(len(components), 2)
+        self.assertEqual([component.component_count for component in components], [1, 1])
+        self.assertEqual(
+            [component.required_distance_m() for component in components],
+            [routes.route_distance_m([point for _, point in way_nodes[1]]),
+             routes.route_distance_m([point for _, point in way_nodes[2]])],
+        )
+
+    def test_short_disconnected_route_writes_multilinestring_and_offset_profile(self):
+        class FakeElevation:
+            PROFILE_MAX_DISTANCE_M = 40_000
+            instances = []
+
+            def __init__(self, directory):
+                self.route_calls = 0
+                self.__class__.instances.append(self)
+
+            def sample(self, point):
+                return 100
+
+            def route_elevation(self, path, include_profile=True):
+                self.route_calls += 1
+                distance_m = routes.route_distance_m(path)
+                return {
+                    'elevation_gain_m': 10,
+                    'elevation_loss_m': 4,
+                    'profile': {
+                        'segments': [{
+                            'start_m': 0,
+                            'end_m': distance_m,
+                            'elevations': [100, 110],
+                            'coordinates': 'profile',
+                        }],
+                    },
+                }
+
+            @staticmethod
+            def route_duration_min(distance_m, elevation_gain_m, elevation_loss_m):
+                return 15
+
+            def close(self):
+                pass
+
+        relation = {
+            'name': 'Split route',
+            'name_int': '',
+            'symbol': '',
+            'network': 'lwn',
+            'type': 'hiking',
+            'way_ids': [1, 2],
+            'node_roles': {},
+            'needs_landmark_start': False,
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(3, [0.0100, 0.0000]), (4, [0.0110, 0.0000])],
+        }
+        collector = types.SimpleNamespace(relations={1: relation})
+        exporter = types.SimpleNamespace(
+            way_nodes=way_nodes,
+            node_way_ids=None,
+            node_coordinates={},
+            landmark_index=None,
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+            patch.object(routes, 'Elevation', FakeElevation), \
+            patch.dict(os.environ, {'ELEVATION_DIRECTORY': directory}):
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                routes.write_route_lines(collector, exporter)
+            finally:
+                os.chdir(previous_directory)
+
+            metadata = json.loads(Path(directory, 'routes-meta.json').read_text())
+            feature = json.loads(Path(directory, 'hiking-routes-interaction.geojsonseq').read_text())
+
+        self.assertEqual(len(metadata), 1)
+        self.assertEqual(feature['geometry']['type'], 'MultiLineString')
+        self.assertEqual(len(feature['geometry']['coordinates']), 2)
+        self.assertEqual(metadata[0]['duration_min'], 30)
+        self.assertIsNone(metadata[0]['start_lon'])
+        self.assertIsNone(metadata[0]['start_lat'])
+        self.assertIsNone(metadata[0]['finish_lon'])
+        self.assertIsNone(metadata[0]['finish_lat'])
+        profile = metadata[0]['elevation_profile']['segments']
+        self.assertEqual(len(profile), 2)
+        self.assertEqual(profile[0]['start_m'], 0)
+        self.assertEqual(profile[1]['start_m'], routes.route_distance_m([point for _, point in way_nodes[1]]))
+        self.assertEqual(FakeElevation.instances[-1].route_calls, 2)
+
+    def test_long_connected_route_writes_line_without_duration_or_endpoints(self):
+        class FakeElevation:
+            PROFILE_MAX_DISTANCE_M = 40_000
+            instances = []
+
+            def __init__(self, directory):
+                self.route_calls = 0
+                self.__class__.instances.append(self)
+
+            def sample(self, point):
+                return 100
+
+            def route_elevation(self, path, include_profile=True):
+                self.route_calls += 1
+                raise AssertionError('long route must not sample elevation')
+
+            @staticmethod
+            def route_duration_min(distance_m, elevation_gain_m, elevation_loss_m):
+                raise AssertionError('long route must not calculate duration')
+
+            def close(self):
+                pass
+
+        relation = {
+            'name': 'Long route',
+            'name_int': '',
+            'symbol': '',
+            'network': 'lwn',
+            'type': 'hiking',
+            'way_ids': [1],
+            'node_roles': {},
+            'needs_landmark_start': False,
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.5000, 0.0000])],
+        }
+        collector = types.SimpleNamespace(relations={1: relation})
+        exporter = types.SimpleNamespace(
+            way_nodes=way_nodes,
+            node_way_ids=None,
+            node_coordinates={},
+            landmark_index=None,
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+            patch.object(routes, 'Elevation', FakeElevation), \
+            patch.dict(os.environ, {'ELEVATION_DIRECTORY': directory}):
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                routes.write_route_lines(collector, exporter)
+            finally:
+                os.chdir(previous_directory)
+
+            metadata = json.loads(Path(directory, 'routes-meta.json').read_text())
+            feature = json.loads(Path(directory, 'hiking-routes-interaction.geojsonseq').read_text())
+
+        self.assertEqual(feature['geometry']['type'], 'LineString')
+        self.assertIsNone(metadata[0]['duration_min'])
+        self.assertEqual(metadata[0]['elevation_gain_m'], 0)
+        self.assertEqual(metadata[0]['elevation_loss_m'], 0)
+        self.assertEqual(metadata[0]['elevation_profile'], {'segments': []})
+        self.assertIsNone(metadata[0]['start_lon'])
+        self.assertIsNone(metadata[0]['finish_lon'])
+        self.assertEqual(FakeElevation.instances[-1].route_calls, 0)
+
     def test_landmark_categories_use_distance_tiers(self):
         highest = landmark_candidate({'information': 'guidepost'})
         direct_access = landmark_candidate({'amenity': 'parking'})

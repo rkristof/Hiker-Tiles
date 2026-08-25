@@ -384,6 +384,19 @@ def route_distance_m(points):
     return round(polyline_distance_m(points))
 
 
+def offset_elevation_profile(profile, distance_m):
+    return {
+        'segments': [
+            {
+                **segment,
+                'start_m': segment['start_m'] + distance_m,
+                'end_m': segment['end_m'] + distance_m,
+            }
+            for segment in profile['segments']
+        ],
+    }
+
+
 def merge_way_groups(way_groups):
     groups_by_key = {}
     for coordinates, route_properties in way_groups:
@@ -471,44 +484,91 @@ def write_route_lines(collector, exporter):
                     continue
 
                 route_graph.repair_disconnected_components(elevation)
-                landmark_index = exporter.landmark_index if route_relation['needs_landmark_start'] else None
-                start_node = route_graph.resolve_start(exporter.node_coordinates, elevation, landmark_index)
-                finish_node = route_graph.resolve_finish(start_node, exporter.node_coordinates, elevation)
-                explicit_finish = bool(route_relation.get('node_roles', {}).get('end'))
-
-                if route_graph.component_count > 1:
-                    continue
-                if start_node is None:
-                    continue
-                if explicit_finish and finish_node is None:
-                    continue
-
-                traversal = route_graph.shortest_traversal(start_node, finish_node)
-                if traversal is None:
-                    continue
-
-                steps, finish_node = traversal
-                path, _ = route_graph.traversal_coordinates(start_node, steps)
-                distance_m = route_distance_m(path)
-                if distance_m > Elevation.PROFILE_MAX_DISTANCE_M:
-                    elevation_data = {
-                        'elevation_gain_m': 0,
-                        'elevation_loss_m': 0,
-                        'profile': {'segments': []},
-                    }
-                else:
-                    elevation_data = elevation.route_elevation(
-                        path,
-                        include_profile=distance_m < Elevation.PROFILE_MAX_DISTANCE_M,
+                graph_distance_m = route_graph.required_distance_m()
+                component_graphs = route_graph.component_graphs()
+                component_results = []
+                for component_graph in component_graphs:
+                    landmark_index = exporter.landmark_index if route_relation['needs_landmark_start'] else None
+                    start_node = component_graph.resolve_start(
+                        exporter.node_coordinates,
+                        elevation,
+                        landmark_index,
                     )
-                elevation_gain_m = elevation_data['elevation_gain_m']
-                elevation_loss_m = elevation_data['elevation_loss_m']
-                elevation_profile = elevation_data['profile']
-                duration_min = elevation.route_duration_min(
-                    distance_m,
-                    elevation_gain_m,
-                    elevation_loss_m,
+                    finish_node = component_graph.resolve_finish(
+                        start_node,
+                        exporter.node_coordinates,
+                        elevation,
+                    )
+                    if start_node is None:
+                        component_results = []
+                        break
+                    if component_graph.has_explicit_finish and finish_node is None:
+                        component_results = []
+                        break
+
+                    traversal = component_graph.shortest_traversal(start_node, finish_node)
+                    if traversal is None:
+                        component_results = []
+                        break
+
+                    steps, finish_node = traversal
+                    path, _ = component_graph.traversal_coordinates(start_node, steps)
+                    component_results.append({
+                        'graph': component_graph,
+                        'path': path,
+                        'distance_m': route_distance_m(path),
+                        'start_node': start_node,
+                        'finish_node': finish_node,
+                    })
+
+                if not component_results:
+                    continue
+
+                distance_m = sum(result['distance_m'] for result in component_results)
+                is_short_route = (
+                    graph_distance_m < Elevation.PROFILE_MAX_DISTANCE_M
+                    and distance_m < Elevation.PROFILE_MAX_DISTANCE_M
                 )
+                elevation_gain_m = 0
+                elevation_loss_m = 0
+                elevation_profile = {'segments': []}
+                duration_min = None
+                if is_short_route:
+                    component_durations = []
+                    distance_offset_m = 0
+                    for result in component_results:
+                        elevation_data = elevation.route_elevation(
+                            result['path'],
+                            include_profile=True,
+                        )
+                        elevation_gain_m += elevation_data['elevation_gain_m']
+                        elevation_loss_m += elevation_data['elevation_loss_m']
+                        elevation_profile['segments'].extend(
+                            offset_elevation_profile(
+                                elevation_data['profile'],
+                                distance_offset_m,
+                            )['segments']
+                        )
+                        component_durations.append(elevation.route_duration_min(
+                            result['distance_m'],
+                            elevation_data['elevation_gain_m'],
+                            elevation_data['elevation_loss_m'],
+                        ))
+                        distance_offset_m += result['distance_m']
+                    duration_min = sum(component_durations)
+
+                geometry_type = 'LineString' if len(component_results) == 1 else 'MultiLineString'
+                geometry_coordinates = (
+                    component_results[0]['path']
+                    if geometry_type == 'LineString'
+                    else [result['path'] for result in component_results]
+                )
+                all_points = [
+                    point
+                    for result in component_results
+                    for point in result['path']
+                ]
+                endpoints = component_results[0] if is_short_route and len(component_results) == 1 else None
                 route_metadata.append({
                     'id': relation_id,
                     'name': route_relation['name'],
@@ -516,19 +576,19 @@ def write_route_lines(collector, exporter):
                     'symbol': route_relation['symbol'],
                     'network': route_relation['network'],
                     'type': route_relation['type'],
-                    'min_lon': min(point[0] for point in path),
-                    'min_lat': min(point[1] for point in path),
-                    'max_lon': max(point[0] for point in path),
-                    'max_lat': max(point[1] for point in path),
+                    'min_lon': min(point[0] for point in all_points),
+                    'min_lat': min(point[1] for point in all_points),
+                    'max_lon': max(point[0] for point in all_points),
+                    'max_lat': max(point[1] for point in all_points),
                     'distance_m': distance_m,
                     'elevation_gain_m': elevation_gain_m,
                     'elevation_loss_m': elevation_loss_m,
                     'elevation_profile': elevation_profile,
                     'duration_min': duration_min,
-                    'start_lon': route_graph.point(start_node)[0],
-                    'start_lat': route_graph.point(start_node)[1],
-                    'finish_lon': route_graph.point(finish_node)[0],
-                    'finish_lat': route_graph.point(finish_node)[1],
+                    'start_lon': endpoints['graph'].point(endpoints['start_node'])[0] if endpoints else None,
+                    'start_lat': endpoints['graph'].point(endpoints['start_node'])[1] if endpoints else None,
+                    'finish_lon': endpoints['graph'].point(endpoints['finish_node'])[0] if endpoints else None,
+                    'finish_lat': endpoints['graph'].point(endpoints['finish_node'])[1] if endpoints else None,
                 })
                 route_properties = {
                     'relation_id': relation_id,
@@ -539,7 +599,7 @@ def write_route_lines(collector, exporter):
                 }
                 write_feature(
                     route_lines_file,
-                    {'type': 'LineString', 'coordinates': path},
+                    {'type': geometry_type, 'coordinates': geometry_coordinates},
                     route_properties,
                 )
                 route_feature_count += 1
