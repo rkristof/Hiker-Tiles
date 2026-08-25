@@ -255,6 +255,39 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(collector.relations[2]['from'], 'A')
         self.assertEqual(collector.relations[2]['to'], 'B')
 
+    def test_flatten_nested_routes_merges_recursive_children_and_suppresses_them(self):
+        class Tag:
+            def __init__(self, key, value):
+                self.k = key
+                self.v = value
+
+        class Member:
+            def __init__(self, member_type, reference):
+                self.type = member_type
+                self.ref = reference
+                self.role = ''
+
+        class Relation:
+            def __init__(self, relation_id, members):
+                self.id = relation_id
+                self.members = members
+                self.tags = [Tag('type', 'route'), Tag('route', 'hiking')]
+
+        collector = routes.WayRouteCollector()
+        with patch.dict(os.environ, {'COUNTRY': 'hungary', 'SYMBOL_TAG': 'osmc:symbol'}):
+            collector.relation(Relation(3, [Member('w', 30)]))
+            collector.relation(Relation(2, [Member('w', 20), Member('r', 3)]))
+            collector.relation(Relation(1, [Member('w', 10), Member('r', 2), Member('w', 11)]))
+
+        collector.flatten_nested_routes()
+
+        self.assertEqual(list(collector.relations), [1])
+        self.assertEqual(collector.relations[1]['way_ids'], [10, 20, 30, 11])
+        self.assertEqual(
+            collector.relations[1]['route_members'],
+            [('w', 10), ('w', 20), ('w', 30), ('w', 11)],
+        )
+
     def test_landmark_collection_skips_irrelevant_way_geometry(self):
         class Way:
             id = 10

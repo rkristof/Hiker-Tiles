@@ -74,7 +74,7 @@ class WayRouteCollector(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.way_routes = {}  # way_id -> route attributes from each relation
-        self.relations = {}   # relation_id -> {route attributes, way_ids}
+        self.relations = {}   # relation_id -> route attributes and members
 
     def relation(self, relation):
         tags = {tag.k: tag.v for tag in relation.tags}
@@ -103,6 +103,11 @@ class WayRouteCollector(osmium.SimpleHandler):
         self.relations[relation.id] = {
             **route_attributes,
             'way_ids': [member.ref for member in relation.members if member.type == 'w'],
+            'route_members': [
+                (member.type, member.ref)
+                for member in relation.members
+                if member.type in ('w', 'r')
+            ],
             'node_roles': node_roles,
             'from': tags.get('from', '').strip(),
             'to': tags.get('to', '').strip(),
@@ -112,6 +117,53 @@ class WayRouteCollector(osmium.SimpleHandler):
         for member in relation.members:
             if member.type == 'w':
                 self.way_routes.setdefault(member.ref, []).append(route_attributes)
+
+    def flatten_nested_routes(self):
+        """Expand supported child routes into parent relations and suppress children."""
+        source_relations = self.relations
+        expanded_way_ids = {}
+        absorbed_relation_ids = set()
+
+        def expand(relation_id, visiting):
+            if relation_id in expanded_way_ids:
+                return expanded_way_ids[relation_id]
+            if relation_id in visiting:
+                return []
+
+            relation = source_relations[relation_id]
+            way_ids = []
+            seen_way_ids = set()
+            next_visiting = visiting | {relation_id}
+            for member_type, member_id in relation['route_members']:
+                if member_type == 'w':
+                    member_way_ids = (member_id,)
+                elif member_id in source_relations and member_id not in next_visiting:
+                    member_way_ids = expand(member_id, next_visiting)
+                    absorbed_relation_ids.add(member_id)
+                else:
+                    member_way_ids = ()
+
+                for way_id in member_way_ids:
+                    if way_id in seen_way_ids:
+                        continue
+                    seen_way_ids.add(way_id)
+                    way_ids.append(way_id)
+
+            expanded_way_ids[relation_id] = way_ids
+            return way_ids
+
+        for relation_id in source_relations:
+            expand(relation_id, set())
+
+        self.relations = {
+            relation_id: {
+                **source_relations[relation_id],
+                'way_ids': expanded_way_ids[relation_id],
+                'route_members': [('w', way_id) for way_id in expanded_way_ids[relation_id]],
+            }
+            for relation_id in source_relations
+            if relation_id not in absorbed_relation_ids
+        }
 
     @staticmethod
     def _make_itinerary(tags):
@@ -607,6 +659,7 @@ def write_symbol_catalog(exporter):
 def main():
     collector = WayRouteCollector()
     collector.apply_file('tiles-filtered.osm.pbf')
+    collector.flatten_nested_routes()
     print(f'Route member ways collected: {len(collector.way_routes)}')
 
     exporter = export_route_features(collector)
