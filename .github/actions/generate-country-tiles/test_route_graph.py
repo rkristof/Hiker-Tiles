@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import types
@@ -32,6 +33,11 @@ class ConstantSampler:
 class SteepSampler:
     def sample(self, point):
         return 100 if point[0] < 0.00075 else 120
+
+
+def load_route_regression_cases():
+    fixture_path = Path(__file__).with_name('route_regression_fixture.json')
+    return json.loads(fixture_path.read_text())
 
 
 class RouteGraphTests(unittest.TestCase):
@@ -415,6 +421,52 @@ class RouteGraphTests(unittest.TestCase):
         )
 
         self.assertEqual(start, 2)
+
+    def test_hungary_routes_preserve_pbf_derived_results(self):
+        sampler = ConstantSampler()
+
+        for case in load_route_regression_cases():
+            with self.subTest(route=case['id']):
+                relation = case['route']
+                way_nodes = {
+                    int(way_id): nodes
+                    for way_id, nodes in case['ways'].items()
+                }
+                memberships = {}
+                for way_id, nodes in way_nodes.items():
+                    for node_id, _ in nodes:
+                        memberships.setdefault(node_id, set()).add(way_id)
+                shared_nodes = set(case.get('shared_nodes', []))
+                node_way_ids = {
+                    node_id: ({0, 1} if node_id in shared_nodes or len(way_ids) > 1 else {0})
+                    for node_id, way_ids in memberships.items()
+                }
+                node_coordinates = {
+                    int(node_id): point
+                    for node_id, point in case.get('node_coordinates', {}).items()
+                }
+                graph = routes.RouteGraph(relation, way_nodes, node_way_ids)
+                graph.repair_disconnected_components(sampler)
+                landmarks = (
+                    routes.LandmarkIndex([case['landmark']])
+                    if 'landmark' in case
+                    else None
+                )
+                start = graph.resolve_start(node_coordinates, sampler, landmarks)
+                finish = graph.resolve_finish(start, node_coordinates, sampler)
+                traversal = graph.shortest_traversal(start, finish)
+
+                self.assertIsNotNone(traversal)
+                steps, finish = traversal
+                path, path_finish = graph.traversal_coordinates(start, steps)
+                result = {
+                    'start': graph.point(start),
+                    'finish': graph.point(finish),
+                    'distance_m': routes.route_distance_m(path),
+                }
+
+                self.assertEqual(path_finish, finish)
+                self.assertEqual(result, case['expected'])
 
 
 if __name__ == '__main__':
