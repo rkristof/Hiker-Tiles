@@ -10,7 +10,7 @@ except ModuleNotFoundError:
     sys.modules['rasterio'] = types.SimpleNamespace()
 
 sys.path.insert(0, str(Path(__file__).parent))
-from elevation import Elevation
+from elevation import Elevation, offset_elevation_profile
 
 
 class ConstantSampler:
@@ -40,6 +40,21 @@ class SequenceSampler:
 
 
 class ElevationTests(unittest.TestCase):
+    def test_offset_elevation_profile(self):
+        profile = {
+            'segments': [
+                {'start_m': 0, 'end_m': 120, 'elevations': [100, 110], 'coordinates': 'profile'},
+                {'start_m': 240, 'end_m': 300, 'elevations': [110, 105], 'coordinates': 'profile'},
+            ],
+        }
+
+        offset_profile = offset_elevation_profile(profile, 500)
+
+        self.assertEqual(
+            [(segment['start_m'], segment['end_m']) for segment in offset_profile['segments']],
+            [(500, 620), (740, 800)],
+        )
+
     def test_profile_includes_off_grid_endpoint(self):
         path = [[0.0000, 0.0000], [0.0010, 0.0000]]
         elevation = Elevation(sampler=ConstantSampler())

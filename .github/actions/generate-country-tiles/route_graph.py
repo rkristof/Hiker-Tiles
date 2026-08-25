@@ -463,7 +463,7 @@ class RouteGraph:
             elif current_node == second_node:
                 next_node = first_node
             else:
-                return coordinates, current_node
+                return coordinates
 
             if edge['points'][0] == self.point(current_node):
                 edge_points = edge['points']
@@ -471,7 +471,7 @@ class RouteGraph:
                 edge_points = list(reversed(edge['points']))
             coordinates.extend(edge_points[1:])
             current_node = next_node
-        return coordinates, current_node
+        return coordinates
 
     def _build(self, way_nodes):
         relation_way_nodes = [

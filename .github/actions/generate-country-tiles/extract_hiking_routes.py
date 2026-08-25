@@ -3,7 +3,7 @@ import os
 
 import osmium
 
-from elevation import Elevation
+from elevation import Elevation, offset_elevation_profile
 from route_graph import LandmarkIndex, RouteGraph, landmark_candidate, polyline_distance_m
 
 
@@ -384,19 +384,6 @@ def route_distance_m(points):
     return round(polyline_distance_m(points))
 
 
-def offset_elevation_profile(profile, distance_m):
-    return {
-        'segments': [
-            {
-                **segment,
-                'start_m': segment['start_m'] + distance_m,
-                'end_m': segment['end_m'] + distance_m,
-            }
-            for segment in profile['segments']
-        ],
-    }
-
-
 def merge_way_groups(way_groups):
     groups_by_key = {}
     for coordinates, route_properties in way_groups:
@@ -512,7 +499,7 @@ def write_route_lines(collector, exporter):
                         break
 
                     steps, finish_node = traversal
-                    path, _ = component_graph.traversal_coordinates(start_node, steps)
+                    path = component_graph.traversal_coordinates(start_node, steps)
                     component_results.append({
                         'graph': component_graph,
                         'path': path,
@@ -529,18 +516,17 @@ def write_route_lines(collector, exporter):
                     graph_distance_m < Elevation.PROFILE_MAX_DISTANCE_M
                     and distance_m < Elevation.PROFILE_MAX_DISTANCE_M
                 )
-                elevation_gain_m = 0
-                elevation_loss_m = 0
+                elevation_gain_m = None
+                elevation_loss_m = None
                 elevation_profile = {'segments': []}
                 duration_min = None
                 if is_short_route:
+                    elevation_gain_m = 0
+                    elevation_loss_m = 0
                     component_durations = []
                     distance_offset_m = 0
                     for result in component_results:
-                        elevation_data = elevation.route_elevation(
-                            result['path'],
-                            include_profile=True,
-                        )
+                        elevation_data = elevation.route_elevation(result['path'])
                         elevation_gain_m += elevation_data['elevation_gain_m']
                         elevation_loss_m += elevation_data['elevation_loss_m']
                         elevation_profile['segments'].extend(

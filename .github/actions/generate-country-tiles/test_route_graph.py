@@ -72,7 +72,7 @@ class RouteGraphTests(unittest.TestCase):
             def sample(self, point):
                 return 100
 
-            def route_elevation(self, path, include_profile=True):
+            def route_elevation(self, path):
                 self.route_calls += 1
                 distance_m = routes.route_distance_m(path)
                 return {
@@ -134,6 +134,8 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(feature['geometry']['type'], 'MultiLineString')
         self.assertEqual(len(feature['geometry']['coordinates']), 2)
         self.assertEqual(metadata[0]['duration_min'], 30)
+        self.assertEqual(metadata[0]['elevation_gain_m'], 20)
+        self.assertEqual(metadata[0]['elevation_loss_m'], 8)
         self.assertIsNone(metadata[0]['start_lon'])
         self.assertIsNone(metadata[0]['start_lat'])
         self.assertIsNone(metadata[0]['finish_lon'])
@@ -156,7 +158,7 @@ class RouteGraphTests(unittest.TestCase):
             def sample(self, point):
                 return 100
 
-            def route_elevation(self, path, include_profile=True):
+            def route_elevation(self, path):
                 self.route_calls += 1
                 raise AssertionError('long route must not sample elevation')
 
@@ -203,8 +205,8 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(feature['geometry']['type'], 'LineString')
         self.assertIsNone(metadata[0]['duration_min'])
-        self.assertEqual(metadata[0]['elevation_gain_m'], 0)
-        self.assertEqual(metadata[0]['elevation_loss_m'], 0)
+        self.assertIsNone(metadata[0]['elevation_gain_m'])
+        self.assertIsNone(metadata[0]['elevation_loss_m'])
         self.assertEqual(metadata[0]['elevation_profile'], {'segments': []})
         self.assertIsNone(metadata[0]['start_lon'])
         self.assertIsNone(metadata[0]['finish_lon'])
@@ -428,10 +430,10 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
         steps, finish = graph.shortest_traversal(1)
-        path, path_finish = graph.traversal_coordinates(1, steps)
+        path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 3)
-        self.assertEqual(path_finish, 3)
+        self.assertEqual(path[-1], graph.point(finish))
         self.assertEqual(path[0], [0.0, 0.0])
         self.assertEqual(path[-1], [0.002, 0.0])
         self.assertIn([0.001, 0.001], path)
@@ -449,10 +451,10 @@ class RouteGraphTests(unittest.TestCase):
         graph = routes.RouteGraph(relation, way_nodes)
 
         steps, finish = graph.shortest_traversal(1)
-        path, path_finish = graph.traversal_coordinates(1, steps)
+        path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 1)
-        self.assertEqual(path_finish, 1)
+        self.assertEqual(path[-1], graph.point(finish))
         self.assertEqual(path[0], [0.0, 0.0])
         self.assertEqual(path[-1], [0.0, 0.0])
         self.assertEqual(len(steps), 5)
@@ -476,11 +478,11 @@ class RouteGraphTests(unittest.TestCase):
         start = graph.resolve_start({}, None, ())
         self.assertIsNone(graph.resolve_finish(start, {}, None))
         steps, finish = graph.shortest_traversal(start)
-        _, path_finish = graph.traversal_coordinates(start, steps)
+        path = graph.traversal_coordinates(start, steps)
 
         self.assertEqual(start, 1)
         self.assertEqual(finish, 5)
-        self.assertEqual(path_finish, 5)
+        self.assertEqual(path[-1], graph.point(finish))
 
     def test_duplicate_members_without_open_endpoint_keep_closed_traversal(self):
         relation = {
@@ -499,11 +501,11 @@ class RouteGraphTests(unittest.TestCase):
         start = graph.resolve_start({}, None, ())
         self.assertIsNone(graph.resolve_finish(start, {}, None))
         steps, finish = graph.shortest_traversal(start)
-        _, path_finish = graph.traversal_coordinates(start, steps)
+        path = graph.traversal_coordinates(start, steps)
 
         self.assertEqual(start, 1)
         self.assertEqual(finish, 1)
-        self.assertEqual(path_finish, 1)
+        self.assertEqual(path[-1], graph.point(finish))
 
     def test_cycle_away_from_start_ignores_roundtrip(self):
         relation = {
@@ -522,10 +524,10 @@ class RouteGraphTests(unittest.TestCase):
         finish = graph.resolve_finish(1, {}, None)
         self.assertIsNone(finish)
         steps, finish = graph.shortest_traversal(1, finish)
-        _, path_finish = graph.traversal_coordinates(1, steps)
+        path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 2)
-        self.assertEqual(path_finish, 2)
+        self.assertEqual(path[-1], graph.point(finish))
         self.assertEqual(len(steps), 4)
 
     def test_roundtrip_returns_to_start(self):
@@ -538,10 +540,10 @@ class RouteGraphTests(unittest.TestCase):
         graph = routes.RouteGraph(relation, way_nodes)
         finish = graph.resolve_finish(1, {}, None)
         steps, finish = graph.shortest_traversal(1, finish)
-        _, path_finish = graph.traversal_coordinates(1, steps)
+        path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 1)
-        self.assertEqual(path_finish, 1)
+        self.assertEqual(path[-1], graph.point(finish))
 
     def test_explicit_finish_is_used(self):
         relation = {'way_ids': [1, 2], 'node_roles': {'start': [1], 'end': [3]}}
@@ -554,7 +556,7 @@ class RouteGraphTests(unittest.TestCase):
         steps, finish = graph.shortest_traversal(1, 3)
 
         self.assertEqual(finish, 3)
-        self.assertEqual(graph.traversal_coordinates(1, steps)[1], 3)
+        self.assertEqual(graph.traversal_coordinates(1, steps)[-1], graph.point(finish))
 
     def test_repair_requires_both_distance_thresholds(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
@@ -627,14 +629,14 @@ class RouteGraphTests(unittest.TestCase):
 
                 self.assertIsNotNone(traversal)
                 steps, finish = traversal
-                path, path_finish = graph.traversal_coordinates(start, steps)
+                path = graph.traversal_coordinates(start, steps)
                 result = {
                     'start': graph.point(start),
                     'finish': graph.point(finish),
                     'distance_m': routes.route_distance_m(path),
                 }
 
-                self.assertEqual(path_finish, finish)
+                self.assertEqual(path[-1], graph.point(finish))
                 self.assertEqual(result, case['expected'])
 
 

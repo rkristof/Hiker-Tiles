@@ -6,6 +6,19 @@ import rasterio
 from route_graph import haversine_distance_m
 
 
+def offset_elevation_profile(profile, distance_m):
+    return {
+        'segments': [
+            {
+                **segment,
+                'start_m': segment['start_m'] + distance_m,
+                'end_m': segment['end_m'] + distance_m,
+            }
+            for segment in profile['segments']
+        ],
+    }
+
+
 class Elevation:
     PROFILE_MAX_DISTANCE_M = 40_000
     PROFILE_SAMPLE_INTERVAL_M = 40
@@ -45,8 +58,8 @@ class Elevation:
         elevation = float(elevation)
         return elevation if math.isfinite(elevation) else None
 
-    def route_elevation(self, path, include_profile=True):
-        """Sample route elevation once and calculate totals with an optional profile."""
+    def route_elevation(self, path):
+        """Sample route elevation once and calculate totals with a profile."""
         elevation_gain_m = 0.0
         elevation_loss_m = 0.0
         profile_segments = []
@@ -61,11 +74,10 @@ class Elevation:
             segment_gain_m, segment_loss_m = self.calculate_elevation_change(current_segment)
             elevation_gain_m += segment_gain_m
             elevation_loss_m += segment_loss_m
-            if include_profile:
-                profile_segments.append(self.build_elevation_profile_segment([
-                    (path_distance, point, round(elevation))
-                    for path_distance, point, elevation in current_segment
-                ]))
+            profile_segments.append(self.build_elevation_profile_segment([
+                (path_distance, point, round(elevation))
+                for path_distance, point, elevation in current_segment
+            ]))
             current_segment = []
 
         for path_distance, point in self.sample_path_points(
