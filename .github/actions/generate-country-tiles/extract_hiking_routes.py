@@ -547,7 +547,9 @@ def write_route_lines(collector, exporter):
                         component_results = []
                         break
 
-                    steps, finish_node = traversal
+                    steps, traversal_finish_node = traversal
+                    if finish_node is None:
+                        finish_node = traversal_finish_node
                     path = component_graph.traversal_coordinates(start_node, steps)
                     component_results.append({
                         'graph': component_graph,
