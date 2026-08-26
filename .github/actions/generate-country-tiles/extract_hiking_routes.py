@@ -345,7 +345,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         if not route_attributes:
             return
         coordinates = [point for _, point in nodes]
-        self.way_nodes[way.id] = nodesú
+        self.way_nodes[way.id] = nodes
         # A way may belong to several relations. Use the highest-ranked network
         # for shared line properties and retain the most demanding difficulty.
         primary_route = min(route_attributes, key=lambda attributes: NETWORK_RANK[attributes['network']])
