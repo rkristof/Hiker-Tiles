@@ -299,7 +299,6 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.symbol_groups_buffer = []  # buffered (coordinates, route_properties, symbol_entries)
         self.way_groups_buffer = []  # buffered (coordinates, route_properties), merged after the pass
         self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
-        self.node_way_ids = {}  # node_id -> route way IDs, shared across relations
         self.node_coordinates = {}  # node_id -> coordinates for relation endpoint markers
         self.landmarks = []  # candidate landmarks used only by relations without starts
         self.landmark_index = None
@@ -346,9 +345,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         if not route_attributes:
             return
         coordinates = [point for _, point in nodes]
-        self.way_nodes[way.id] = nodes
-        for node_id, _ in nodes:
-            self.node_way_ids.setdefault(node_id, set()).add(way.id)
+        self.way_nodes[way.id] = nodesú
         # A way may belong to several relations. Use the highest-ranked network
         # for shared line properties and retain the most demanding difficulty.
         primary_route = min(route_attributes, key=lambda attributes: NETWORK_RANK[attributes['network']])
@@ -518,13 +515,17 @@ def write_route_lines(collector, exporter):
     try:
         with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
             for relation_id, route_relation in collector.relations.items():
-                route_graph = RouteGraph(route_relation, exporter.way_nodes, exporter.node_way_ids)
+                route_graph = RouteGraph(route_relation, exporter.way_nodes)
                 if not route_graph.has_edges:
                     continue
 
                 route_graph.repair_disconnected_components(elevation)
                 graph_distance_m = route_graph.required_distance_m()
-                component_graphs = route_graph.component_graphs()
+                component_graphs = (
+                    [route_graph]
+                    if route_graph.component_count == 1
+                    else route_graph.component_graphs()
+                )
                 component_results = []
                 for component_graph in component_graphs:
                     landmark_index = exporter.landmark_index if route_relation['needs_landmark_start'] else None
