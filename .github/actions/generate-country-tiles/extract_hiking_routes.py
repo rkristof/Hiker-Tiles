@@ -110,10 +110,6 @@ class WayRouteCollector(osmium.SimpleHandler):
                 if member.type in ('w', 'r')
             ],
             'node_roles': node_roles,
-            'from': tags.get('from', '').strip(),
-            'to': tags.get('to', '').strip(),
-            'roundtrip': tags.get('roundtrip', '').strip().lower() == 'yes',
-            'needs_landmark_start': not bool(node_roles.get('start')),
         }
         for member in relation.members:
             if member.type == 'w':
@@ -493,7 +489,7 @@ def write_route_layers(exporter):
 def export_route_features(collector):
     with open('natural-points.geojsonseq', 'w') as points_file:
         collect_landmarks = any(
-            route_relation['needs_landmark_start']
+            not route_relation.get('node_roles', {}).get('start')
             for route_relation in collector.relations.values()
         )
         exporter = GeoJSONExporter(collector.way_routes,points_file,collect_landmarks)
@@ -525,36 +521,16 @@ def write_route_lines(collector, exporter):
                 )
                 component_results = []
                 for component_graph in component_graphs:
-                    landmark_index = exporter.landmark_index if route_relation['needs_landmark_start'] else None
-                    start_node = component_graph.resolve_start(
+                    traversal = component_graph.shortest_route(
                         exporter.node_coordinates,
                         elevation,
-                        landmark_index,
-                    )
-                    finish_node = component_graph.resolve_finish(
-                        start_node,
-                        exporter.node_coordinates,
-                        elevation,
-                    )
-                    if start_node is None:
-                        component_results = []
-                        break
-                    if component_graph.has_explicit_finish and finish_node is None:
-                        component_results = []
-                        break
-
-                    traversal = component_graph.shortest_traversal(
-                        start_node,
-                        finish_node,
-                        finish_is_explicit=component_graph.has_explicit_finish,
+                        exporter.landmark_index,
                     )
                     if traversal is None:
                         component_results = []
                         break
 
-                    steps, traversal_finish_node = traversal
-                    if not component_graph.has_explicit_finish:
-                        finish_node = traversal_finish_node
+                    start_node, steps, finish_node = traversal
                     path = component_graph.traversal_coordinates(start_node, steps)
                     component_results.append({
                         'graph': component_graph,
