@@ -714,16 +714,26 @@ class RouteGraphTests(unittest.TestCase):
     # - 4120196: Oszoly-ösvény (Csobánka, Oszoly-pihenő – Oszoly-csúcs)
     # - 5845823: KT, Kékkő tanösvény
     # - 10093867: Hajta természetismereti túra
-    # - 3219501: K▲ (Kékestető – Mátrafüred)
-    # - 8911845: ZΩ (Szalajka-völgy - Istállós-kői barlang)
-    # - 3466700: S, Baradla tanösvény
-    # - 2146970: Z (Tihany, apátsági templom – Tihany, rév)
     # - 16122238: ST209 Esztergom - Dobogókő
     # - 11134335: Sóvirág tanösvény (two-way circular relation)
+    # - 15865671: Fent és lent – Tanösvény a Guckler Károly úton
+    # - 9273737: Normafa kardioösvény (Normafa – János-hegy)
+    # - 14345638: Keltatúra
+    # - 7314605: IVV, zöld (Esztergom vá. – Vaskapu Th. – Esztergom vá.)
+    # - 5339799: K╱, Szarvaskői geológiai tanösvény
+    # - 4120194: Fehér sziklák ösvény (Csobánka, Margitliget – Oszoly-csúcs – Csobánkai templomok)
+    # - 14873673: KP Jósvafő
+    # - 13008447: Jakobsweg Burgenland – Zubringer 2
+    # - 14568269: PB3 Pap-réti túra
+    # - 3194149: S (Túrony – Bisse – Tenkes hegy – Csodabogyó tanösvény)
+    # - 5695326: PT, Komlóskai Telér tanösvény
+    # - 16467089: Német-völgyi tanösvény (Kőhányás – Német-völgy – Kőhányás)
     def test_hungary_routes_preserve_pbf_derived_results(self):
         sampler = ConstantSampler()
+        cases = load_route_regression_cases()
+        self.assertEqual(len(cases), 20)
 
-        for case in load_route_regression_cases():
+        for case in cases:
             with self.subTest(route=case['id']):
                 relation = {
                     **case['route'],
