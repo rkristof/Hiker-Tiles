@@ -352,6 +352,7 @@ class RouteGraph:
             -bool(candidate['name_match_count']),
             -candidate['category'],
             -candidate['name_match_count'],
+            candidate['relation_order'] is None,
             candidate['score'],
             candidate['distance_m'],
             candidate['node_id'],

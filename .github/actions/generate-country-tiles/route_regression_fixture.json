@@ -4956,7 +4956,8 @@
       {"category": 3,"distance_limit_m": 30,"node_id": 3441442289,"points": [[17.8652322,46.846844]]},
       {"category": 3,"distance_limit_m": 30,"node_id": 3441443565,"points": [[17.8718237,46.8481941]]},
       {"category": 3,"distance_limit_m": 30,"node_id": 3441442290,"points": [[17.865833,46.846083]]},
-      {"category": 3,"distance_limit_m": 30,"node_id": 3441443564,"points": [[17.8746934,46.8484422]]}
+      {"category": 3,"distance_limit_m": 30,"node_id": 3441443564,"points": [[17.8746934,46.8484422]]},
+      {"category": 3,"distance_limit_m": 30,"node_id": 10124270538,"points": [[17.8821011,46.8545354]]}
     ]
   },
   {

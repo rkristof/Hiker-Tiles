@@ -446,6 +446,41 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(start, 1)
 
+    def test_landmark_start_prefers_ordered_route_landmark_over_incidental_landmark(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_ids': [1, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            3: [(3, [0.0020, 0.0000]), (4, [0.0030, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [
+                {
+                    'node_id': 1,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.00004, 0.0000]],
+                },
+                {
+                    'node_id': 99,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.00102, 0.0000]],
+                },
+            ],
+        )
+
+        self.assertEqual(start, 1)
+
     def test_landmark_start_uses_distance_without_relation_order(self):
         relation = {
             'name': 'Route',
