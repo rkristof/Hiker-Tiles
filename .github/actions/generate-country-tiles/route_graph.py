@@ -30,6 +30,7 @@ LANDMARK_RULES = (
 )
 LANDMARK_MAX_DISTANCE_M = max(rule[3] for rule in LANDMARK_RULES)
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
+LANDMARK_ORDER_MAX_BONUS = 0.5
 
 
 def landmark_candidate(tags):
@@ -292,6 +293,10 @@ class RouteGraph:
     def _resolve_landmark_start(self, landmark_index):
         if landmark_index is None or self._graph.number_of_nodes() == 0:
             return None
+        relation_node_ids = tuple(self._route_relation.get('node_ids', ()))
+        relation_node_order = {}
+        for order, node_id in enumerate(relation_node_ids):
+            relation_node_order.setdefault(node_id, order)
         route_tokens = set(
             self._text_token_list(
                 self._route_relation.get('name', ''),
@@ -328,14 +333,26 @@ class RouteGraph:
                 'category': landmark.get('category'),
                 'name_match_count': name_match_count if name_match_count >= 2 else 0,
                 'landmark_id': landmark.get('node_id', landmark.get('way_id', 0)),
+                'distance_limit_m': landmark.get('distance_limit_m', LANDMARK_MAX_DISTANCE_M),
+                'relation_order': relation_node_order.get(landmark.get('node_id')),
             })
 
         if not candidates:
             return None
+        for candidate in candidates:
+            distance_score = candidate['distance_m'] / max(candidate['distance_limit_m'], 1)
+            order = candidate['relation_order']
+            order_score = (
+                LANDMARK_ORDER_MAX_BONUS * order / max(len(relation_node_ids) - 1, 1)
+                if order is not None and len(relation_node_ids) > 1
+                else 0
+            )
+            candidate['score'] = distance_score + order_score
         candidates.sort(key=lambda candidate: (
             -bool(candidate['name_match_count']),
             -candidate['category'],
             -candidate['name_match_count'],
+            candidate['score'],
             candidate['distance_m'],
             candidate['node_id'],
             candidate['landmark_id'],

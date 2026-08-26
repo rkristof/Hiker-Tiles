@@ -103,6 +103,7 @@ class WayRouteCollector(osmium.SimpleHandler):
         self.relations[relation.id] = {
             **route_attributes,
             'way_ids': [member.ref for member in relation.members if member.type == 'w'],
+            'node_ids': [member.ref for member in relation.members if member.type == 'n'],
             'route_members': [
                 (member.type, member.ref)
                 for member in relation.members

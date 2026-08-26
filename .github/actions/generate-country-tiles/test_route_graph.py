@@ -316,6 +316,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertTrue(collector.relations[1]['needs_landmark_start'])
         self.assertFalse(collector.relations[2]['needs_landmark_start'])
+        self.assertEqual(collector.relations[2]['node_ids'], [20])
         self.assertEqual(collector.relations[2]['from'], 'A')
         self.assertEqual(collector.relations[2]['to'], 'B')
 
@@ -409,6 +410,75 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(start, 2)
         self.assertIn(start, graph._graph)
+
+    def test_landmark_start_uses_relation_order_for_close_candidates(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_ids': [1, 3, 4],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            3: [(2, [0.0010, 0.0000]), (4, [0.0010, 0.0010])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [
+                {
+                    'node_id': 1,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.00004, 0.0000]],
+                },
+                {
+                    'node_id': 3,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.0020, 0.0000]],
+                },
+            ],
+        )
+
+        self.assertEqual(start, 1)
+
+    def test_landmark_start_uses_distance_without_relation_order(self):
+        relation = {
+            'name': 'Route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            3: [(2, [0.0010, 0.0000]), (4, [0.0010, 0.0010])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start(
+            {},
+            None,
+            [
+                {
+                    'node_id': 1,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.00020, 0.0000]],
+                },
+                {
+                    'node_id': 3,
+                    'category': LandmarkCategory.HIGHEST,
+                    'distance_limit_m': 30,
+                    'points': [[0.0020, 0.0000]],
+                },
+            ],
+        )
+
+        self.assertEqual(start, 3)
 
     def test_landmark_index_returns_only_nearby_points(self):
         index = LandmarkIndex([
@@ -797,9 +867,12 @@ class RouteGraphTests(unittest.TestCase):
                 }
                 graph = routes.RouteGraph(relation, way_nodes)
                 graph.repair_disconnected_components(sampler)
+                landmark_data = case.get('landmarks')
+                if landmark_data is None and 'landmark' in case:
+                    landmark_data = [case['landmark']]
                 landmarks = (
-                    routes.LandmarkIndex([case['landmark']])
-                    if 'landmark' in case and not relation.get('node_roles', {}).get('start')
+                    routes.LandmarkIndex(landmark_data)
+                    if landmark_data and not relation.get('node_roles', {}).get('start')
                     else None
                 )
                 start = graph.resolve_start(node_coordinates, sampler, landmarks)
