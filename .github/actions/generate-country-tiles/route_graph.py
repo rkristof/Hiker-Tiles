@@ -429,32 +429,40 @@ class RouteGraph:
             return start_node
         return None
 
-    def shortest_traversal(self, start_node, finish_node=None):
+    def shortest_traversal(self, start_node, finish_node=None, *, finish_is_explicit):
         if start_node not in self._graph or not nx.is_connected(self._graph):
             return None
 
-        if finish_node is not None:
-            walk = self._shortest_traversal_to(start_node, finish_node)
-            return None if walk is None else (walk[0], walk[2])
+        if finish_is_explicit:
+            if finish_node is None:
+                return None
+            candidates = (self._shortest_traversal_to(start_node, finish_node),)
+        else:
+            candidates = (
+                self._shortest_traversal_to(start_node, start_node),
+                (
+                    self._shortest_traversal_to(start_node, finish_node)
+                    if finish_node is not None
+                    else self._shortest_traversal_with_free_finish(start_node)
+                ),
+            )
 
-        if self._is_on_cycle(start_node):
-            closed_walk = self._shortest_traversal_to(start_node, start_node)
-            if closed_walk is not None:
-                return closed_walk[0], closed_walk[2]
+        candidates = [candidate for candidate in candidates if candidate is not None]
+        if not candidates:
+            return None
+        walk = min(candidates, key=lambda candidate: candidate[1])
+        return walk[0], walk[2]
 
+    def _shortest_traversal_with_free_finish(self, start_node):
         finish_candidates = sorted(
             node_id
             for node_id, degree in self._graph.degree()
             if node_id != start_node and degree % 2 == 1
         )
         if not finish_candidates:
-            closed_walk = self._shortest_traversal_to(start_node, start_node)
-            if closed_walk is not None:
-                return closed_walk[0], closed_walk[2]
             return None
 
-        open_walk = self._shortest_traversal_to(start_node, None, finish_candidates)
-        return None if open_walk is None else (open_walk[0], open_walk[2])
+        return self._shortest_traversal_to(start_node, None, finish_candidates)
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]

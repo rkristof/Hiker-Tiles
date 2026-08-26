@@ -543,7 +543,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(2, [0.0010, 0.0000]), (5, [0.0010, -0.0010])],
         }
         graph = routes.RouteGraph(relation, way_nodes)
-        steps, finish = graph.shortest_traversal(1)
+        steps, finish = graph.shortest_traversal(1, finish_is_explicit=False)
         path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 3)
@@ -564,7 +564,7 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
-        steps, finish = graph.shortest_traversal(1)
+        steps, finish = graph.shortest_traversal(1, finish_is_explicit=False)
         path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 1)
@@ -573,7 +573,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(path[-1], [0.0, 0.0])
         self.assertEqual(len(steps), 5)
 
-    def test_retraced_leaf_does_not_create_roundtrip_cycle(self):
+    def test_closed_traversal_can_beat_free_finish(self):
         relation = {
             'way_ids': [2, 3, 4, 1, 1, 5, 6, 6],
             'node_roles': {},
@@ -591,11 +591,14 @@ class RouteGraphTests(unittest.TestCase):
 
         start = graph.resolve_start({}, None, ())
         self.assertIsNone(graph.resolve_finish(start, {}, None))
-        steps, finish = graph.shortest_traversal(start)
+        closed_walk = graph._shortest_traversal_to(start, start)
+        free_finish_walk = graph._shortest_traversal_with_free_finish(start)
+        steps, finish = graph.shortest_traversal(start, finish_is_explicit=False)
         path = graph.traversal_coordinates(start, steps)
 
+        self.assertLess(closed_walk[1], free_finish_walk[1])
         self.assertEqual(start, 1)
-        self.assertEqual(finish, 5)
+        self.assertEqual(finish, start)
         self.assertEqual(path[-1], graph.point(finish))
 
     def test_duplicate_members_without_open_endpoint_keep_closed_traversal(self):
@@ -614,7 +617,7 @@ class RouteGraphTests(unittest.TestCase):
 
         start = graph.resolve_start({}, None, ())
         self.assertIsNone(graph.resolve_finish(start, {}, None))
-        steps, finish = graph.shortest_traversal(start)
+        steps, finish = graph.shortest_traversal(start, finish_is_explicit=False)
         path = graph.traversal_coordinates(start, steps)
 
         self.assertEqual(start, 1)
@@ -637,7 +640,7 @@ class RouteGraphTests(unittest.TestCase):
 
         finish = graph.resolve_finish(1, {}, None)
         self.assertIsNone(finish)
-        steps, finish = graph.shortest_traversal(1, finish)
+        steps, finish = graph.shortest_traversal(1, finish, finish_is_explicit=False)
         path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 2)
@@ -653,7 +656,7 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
         finish = graph.resolve_finish(1, {}, None)
-        steps, finish = graph.shortest_traversal(1, finish)
+        steps, finish = graph.shortest_traversal(1, finish, finish_is_explicit=False)
         path = graph.traversal_coordinates(1, steps)
 
         self.assertEqual(finish, 1)
@@ -667,10 +670,47 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
-        steps, finish = graph.shortest_traversal(1, 3)
+        steps, finish = graph.shortest_traversal(1, 3, finish_is_explicit=True)
 
         self.assertEqual(finish, 3)
         self.assertEqual(graph.traversal_coordinates(1, steps)[-1], graph.point(finish))
+
+    def test_inferred_finish_prefers_shorter_closed_traversal(self):
+        relation = {'way_ids': [1, 1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0100, 0.0000])],
+            2: [(2, [0.0100, 0.0000]), (3, [0.0100, 0.0010])],
+            3: [(3, [0.0100, 0.0010]), (4, [0.0100, 0.0020])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start = graph.resolve_start({}, None, None)
+        inferred_finish = graph.resolve_finish(start, {}, None)
+        closed_walk = graph._shortest_traversal_to(start, start)
+        open_walk = graph._shortest_traversal_to(start, inferred_finish)
+        traversal = graph.shortest_traversal(
+            start,
+            inferred_finish,
+            finish_is_explicit=False,
+        )
+
+        self.assertLess(closed_walk[1], open_walk[1])
+        self.assertIsNotNone(traversal)
+        steps, finish = traversal
+        self.assertEqual(start, 1)
+        self.assertEqual(inferred_finish, 4)
+        self.assertEqual(finish, start)
+        self.assertEqual(
+            graph.traversal_coordinates(start, steps)[-1],
+            graph.point(start),
+        )
+
+        explicit_traversal = graph.shortest_traversal(
+            start,
+            inferred_finish,
+            finish_is_explicit=True,
+        )
+        self.assertEqual(explicit_traversal[1], inferred_finish)
 
     def test_repair_requires_both_distance_thresholds(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
@@ -764,7 +804,11 @@ class RouteGraphTests(unittest.TestCase):
                 )
                 start = graph.resolve_start(node_coordinates, sampler, landmarks)
                 resolved_finish = graph.resolve_finish(start, node_coordinates, sampler)
-                traversal = graph.shortest_traversal(start, resolved_finish)
+                traversal = graph.shortest_traversal(
+                    start,
+                    resolved_finish,
+                    finish_is_explicit=graph.has_explicit_finish,
+                )
 
                 self.assertIsNotNone(traversal)
                 steps, traversal_finish = traversal
@@ -776,8 +820,8 @@ class RouteGraphTests(unittest.TestCase):
                 }
 
                 self.assertEqual(path[-1], graph.point(traversal_finish))
-                if case['expected']['start'] == case['expected']['finish']:
-                    self.assertIsNone(resolved_finish)
+                if graph.has_explicit_finish:
+                    self.assertIsNotNone(resolved_finish)
                 self.assertEqual(result, case['expected'])
 
 

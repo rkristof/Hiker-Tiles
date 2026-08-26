@@ -542,13 +542,17 @@ def write_route_lines(collector, exporter):
                         component_results = []
                         break
 
-                    traversal = component_graph.shortest_traversal(start_node, finish_node)
+                    traversal = component_graph.shortest_traversal(
+                        start_node,
+                        finish_node,
+                        finish_is_explicit=component_graph.has_explicit_finish,
+                    )
                     if traversal is None:
                         component_results = []
                         break
 
                     steps, traversal_finish_node = traversal
-                    if finish_node is None:
+                    if not component_graph.has_explicit_finish:
                         finish_node = traversal_finish_node
                     path = component_graph.traversal_coordinates(start_node, steps)
                     component_results.append({
