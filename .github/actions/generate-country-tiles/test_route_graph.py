@@ -288,6 +288,23 @@ class RouteGraphTests(unittest.TestCase):
             [('w', 10), ('w', 20), ('w', 30), ('w', 11)],
         )
 
+    def test_flatten_nested_routes_preserves_repeated_way_members(self):
+        collector = routes.WayRouteCollector()
+        collector.relations = {
+            1: {
+                'way_ids': [10, 11, 10],
+                'route_members': [('w', 10), ('w', 11), ('w', 10)],
+            },
+        }
+
+        collector.flatten_nested_routes()
+
+        self.assertEqual(collector.relations[1]['way_ids'], [10, 11, 10])
+        self.assertEqual(
+            collector.relations[1]['route_members'],
+            [('w', 10), ('w', 11), ('w', 10)],
+        )
+
     def test_landmark_collection_skips_irrelevant_way_geometry(self):
         class Way:
             id = 10

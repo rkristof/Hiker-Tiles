@@ -132,7 +132,6 @@ class WayRouteCollector(osmium.SimpleHandler):
 
             relation = source_relations[relation_id]
             way_ids = []
-            seen_way_ids = set()
             next_visiting = visiting | {relation_id}
             for member_type, member_id in relation['route_members']:
                 if member_type == 'w':
@@ -144,9 +143,6 @@ class WayRouteCollector(osmium.SimpleHandler):
                     member_way_ids = ()
 
                 for way_id in member_way_ids:
-                    if way_id in seen_way_ids:
-                        continue
-                    seen_way_ids.add(way_id)
                     way_ids.append(way_id)
 
             expanded_way_ids[relation_id] = way_ids
