@@ -146,7 +146,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(profile[1]['start_m'], routes.route_distance_m([point for _, point in way_nodes[1]]))
         self.assertEqual(FakeElevation.instances[-1].route_calls, 2)
 
-    def test_closed_route_writes_no_finish_metadata(self):
+    def test_closed_route_writes_finish_at_start(self):
         class FakeElevation:
             PROFILE_MAX_DISTANCE_M = 40_000
 
@@ -207,8 +207,8 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(feature['geometry']['coordinates'][-1], [0.0, 0.0])
         self.assertEqual(metadata[0]['start_lon'], 0.0)
         self.assertEqual(metadata[0]['start_lat'], 0.0)
-        self.assertIsNone(metadata[0]['finish_lon'])
-        self.assertIsNone(metadata[0]['finish_lat'])
+        self.assertEqual(metadata[0]['finish_lon'], 0.0)
+        self.assertEqual(metadata[0]['finish_lat'], 0.0)
 
     def test_long_connected_route_writes_line_without_duration_or_endpoints(self):
         class FakeElevation:
@@ -719,52 +719,55 @@ class RouteGraphTests(unittest.TestCase):
     # - 3466700: S, Baradla tanösvény
     # - 2146970: Z (Tihany, apátsági templom – Tihany, rév)
     # - 16122238: ST209 Esztergom - Dobogókő
-    # - 4111515: Mária-út, M02-27A (Esztergom – Dobogókő)
     # - 11134335: Sóvirág tanösvény (two-way circular relation)
     def test_hungary_routes_preserve_pbf_derived_results(self):
         sampler = ConstantSampler()
 
         for case in load_route_regression_cases():
             with self.subTest(route=case['id']):
-                relation = case['route']
+                relation = {
+                    **case['route'],
+                    'route_members': [
+                        ('w', way_id)
+                        for way_id in case['route']['way_ids']
+                    ],
+                }
+                collector = routes.WayRouteCollector()
+                collector.relations = {case['id']: relation}
+                collector.flatten_nested_routes()
+                relation = collector.relations[case['id']]
+                self.assertEqual(relation['way_ids'], case['route']['way_ids'])
                 way_nodes = {
                     int(way_id): nodes
                     for way_id, nodes in case['ways'].items()
-                }
-                memberships = {}
-                for way_id, nodes in way_nodes.items():
-                    for node_id, _ in nodes:
-                        memberships.setdefault(node_id, set()).add(way_id)
-                shared_nodes = set(case.get('shared_nodes', []))
-                node_way_ids = {
-                    node_id: ({0, 1} if node_id in shared_nodes or len(way_ids) > 1 else {0})
-                    for node_id, way_ids in memberships.items()
                 }
                 node_coordinates = {
                     int(node_id): point
                     for node_id, point in case.get('node_coordinates', {}).items()
                 }
-                graph = routes.RouteGraph(relation, way_nodes, node_way_ids)
+                graph = routes.RouteGraph(relation, way_nodes)
                 graph.repair_disconnected_components(sampler)
                 landmarks = (
                     routes.LandmarkIndex([case['landmark']])
-                    if 'landmark' in case
+                    if 'landmark' in case and not relation.get('node_roles', {}).get('start')
                     else None
                 )
                 start = graph.resolve_start(node_coordinates, sampler, landmarks)
-                finish = graph.resolve_finish(start, node_coordinates, sampler)
-                traversal = graph.shortest_traversal(start, finish)
+                resolved_finish = graph.resolve_finish(start, node_coordinates, sampler)
+                traversal = graph.shortest_traversal(start, resolved_finish)
 
                 self.assertIsNotNone(traversal)
-                steps, finish = traversal
+                steps, traversal_finish = traversal
                 path = graph.traversal_coordinates(start, steps)
                 result = {
                     'start': graph.point(start),
-                    'finish': graph.point(finish),
+                    'finish': graph.point(traversal_finish),
                     'distance_m': routes.route_distance_m(path),
                 }
 
-                self.assertEqual(path[-1], graph.point(finish))
+                self.assertEqual(path[-1], graph.point(traversal_finish))
+                if case['expected']['start'] == case['expected']['finish']:
+                    self.assertIsNone(resolved_finish)
                 self.assertEqual(result, case['expected'])
 
 
