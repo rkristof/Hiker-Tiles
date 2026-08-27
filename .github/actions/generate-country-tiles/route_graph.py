@@ -6,41 +6,26 @@ import networkx as nx
 
 
 class LandmarkCategory(IntEnum):
-    MEDIUM = 1
-    HIGH = 2
     HIGHEST = 3
 
 
 LANDMARK_RULES = (
-    ('highway', 'trailhead', LandmarkCategory.HIGHEST, 30),
-    ('information', 'guidepost', LandmarkCategory.HIGHEST, 30),
-    ('information', 'map', LandmarkCategory.HIGHEST, 30),
-    ('information', 'board', LandmarkCategory.HIGHEST, 30),
-    ('tourism', 'information', LandmarkCategory.HIGHEST, 30),
-    ('parking', 'entrance', LandmarkCategory.HIGH, 30),
-    ('entrance', 'main', LandmarkCategory.HIGH, 30),
-    ('amenity', 'parking', LandmarkCategory.HIGH, 60),
-    ('tourism', 'visitor_centre', LandmarkCategory.HIGH, 60),
-    ('highway', 'bus_stop', LandmarkCategory.MEDIUM, 90),
-    ('public_transport', 'platform', LandmarkCategory.MEDIUM, 90),
-    ('public_transport', 'stop_position', LandmarkCategory.MEDIUM, 90),
-    ('railway', 'station', LandmarkCategory.MEDIUM, 90),
-    ('railway', 'halt', LandmarkCategory.MEDIUM, 90),
-    ('aerialway', 'station', LandmarkCategory.MEDIUM, 90),
+    ('highway', 'trailhead'),
+    ('information', 'guidepost'),
+    ('information', 'map'),
+    ('information', 'board'),
+    ('tourism', 'information'),
 )
-LANDMARK_MAX_DISTANCE_M = max(rule[3] for rule in LANDMARK_RULES)
+LANDMARK_MAX_DISTANCE_M = 30
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
-LANDMARK_ORDER_MAX_BONUS = 0.5
-NEAR_SHORTEST_TRAVERSAL_TOLERANCE = 0.10
 
 
 def landmark_candidate(tags):
     """Return selected metadata for a high-signal OSM landmark, if applicable."""
-    for key, value, category, distance_limit_m in LANDMARK_RULES:
+    for key, value in LANDMARK_RULES:
         if tags.get(key) == value:
             return {
-                'category': category,
-                'distance_limit_m': distance_limit_m,
+                'category': LandmarkCategory.HIGHEST,
                 'tag_key': key,
                 'tag_value': value,
                 'name': tags.get('name', ''),
@@ -99,7 +84,7 @@ class RouteGraph:
         self._graph = nx.MultiGraph()
         self._simple_graph = None
         self._shortest_path_cache = {}
-        self._relation_way_endpoints = []
+        self._relation_node_order = {}
         self._build(way_nodes)
 
     @property
@@ -133,11 +118,11 @@ class RouteGraph:
             component_graph._graph = self._graph.subgraph(component).copy()
             component_graph._simple_graph = None
             component_graph._shortest_path_cache = {}
-            component_graph._relation_way_endpoints = [
-                endpoints
-                for endpoints in self._relation_way_endpoints
-                if endpoints[0] in component and endpoints[1] in component
-            ]
+            component_graph._relation_node_order = {
+                node_id: order
+                for node_id, order in self._relation_node_order.items()
+                if node_id in component
+            }
             component_graphs.append(component_graph)
         return component_graphs
 
@@ -246,87 +231,48 @@ class RouteGraph:
             component_parent[second_component] = first_component
             repairs += 1
 
-    def _landmark_candidates(self, landmark_index, allowed_nodes=None):
+    def _route_landmark_nodes(self, landmarks):
+        landmark_index = self._landmark_index(landmarks)
         if landmark_index is None or self._graph.number_of_nodes() == 0:
-            return []
-        allowed_nodes = set(allowed_nodes) if allowed_nodes is not None else None
-        relation_node_ids = tuple(self._route_relation.get('node_ids', ()))
-        relation_node_order = {}
-        for order, node_id in enumerate(relation_node_ids):
-            relation_node_order.setdefault(node_id, order)
+            return set()
+
         route_tokens = set(
             self._text_token_list(
                 self._route_relation.get('name', ''),
                 self._route_relation.get('name_int', ''),
             )
         )
-        nearest_by_landmark = {}
+        if not route_tokens:
+            return set()
+
+        landmark_nodes = set()
         for node_id, graph_attributes in self._graph.nodes(data=True):
-            if allowed_nodes is not None and node_id not in allowed_nodes:
-                continue
-            graph_point = graph_attributes['point']
-            for landmark_index_value, landmark_point in landmark_index.nearby(graph_point):
+            for landmark_index_value, landmark_point in landmark_index.nearby(graph_attributes['point']):
                 landmark = landmark_index.landmark(landmark_index_value)
-                distance_m = haversine_distance_m(landmark_point, graph_point)
-                if distance_m > landmark.get('distance_limit_m', 0):
+                if landmark.get('category') != LandmarkCategory.HIGHEST:
                     continue
-                nearest = nearest_by_landmark.get(landmark_index_value)
-                candidate = (distance_m, node_id)
-                if nearest is None or candidate < nearest:
-                    nearest_by_landmark[landmark_index_value] = candidate
-
-        candidates = []
-        for landmark_index_value, (distance_m, node_id) in nearest_by_landmark.items():
-            landmark = landmark_index.landmark(landmark_index_value)
-            landmark_tokens = set(
-                self._text_token_list(
-                    landmark.get('name', ''),
-                    landmark.get('description', ''),
-                    landmark.get('ref', ''),
+                if haversine_distance_m(landmark_point, graph_attributes['point']) > LANDMARK_MAX_DISTANCE_M:
+                    continue
+                landmark_tokens = set(
+                    self._text_token_list(
+                        landmark.get('name', ''),
+                        landmark.get('description', ''),
+                        landmark.get('ref', ''),
+                    )
                 )
-            )
-            name_match_count = len(route_tokens & landmark_tokens)
-            candidates.append({
-                'node_id': node_id,
-                'distance_m': distance_m,
-                'category': landmark.get('category'),
-                'name_match_count': name_match_count if name_match_count >= 2 else 0,
-                'landmark_id': landmark.get('node_id', landmark.get('way_id', 0)),
-                'distance_limit_m': landmark.get('distance_limit_m', LANDMARK_MAX_DISTANCE_M),
-                'relation_order': relation_node_order.get(landmark.get('node_id')),
-            })
+                if len(route_tokens & landmark_tokens) >= 2:
+                    landmark_nodes.add(node_id)
+                    break
+        return landmark_nodes
 
-        for candidate in candidates:
-            distance_score = candidate['distance_m'] / max(candidate['distance_limit_m'], 1)
-            order = candidate['relation_order']
-            order_score = (
-                LANDMARK_ORDER_MAX_BONUS * order / max(len(relation_node_ids) - 1, 1)
-                if order is not None and len(relation_node_ids) > 1
-                else 0
-            )
-            candidate['score'] = distance_score + order_score
-        return candidates
+    def _endpoint_score(self, node_id, landmark_nodes, is_start):
+        order = self._relation_node_order[node_id]
+        return (node_id in landmark_nodes, -order if is_start else order)
 
-    def _best_landmark_by_node(self, candidates):
-        best_by_node = {}
-        for candidate in candidates:
-            node_id = candidate['node_id']
-            previous = best_by_node.get(node_id)
-            if previous is None or self._landmark_sort_key(candidate) < self._landmark_sort_key(previous):
-                best_by_node[node_id] = candidate
-        return best_by_node
-
-    @staticmethod
-    def _landmark_sort_key(candidate):
-        return (
-            -bool(candidate['name_match_count']),
-            -(candidate.get('category') or 0),
-            -candidate['name_match_count'],
-            candidate['relation_order'] is None,
-            candidate['score'],
-            candidate['distance_m'],
-            candidate['node_id'],
-            candidate['landmark_id'],
+    def _best_endpoint(self, nodes, landmark_nodes, is_start):
+        return max(
+            nodes,
+            key=lambda node_id: self._endpoint_score(node_id, landmark_nodes, is_start),
         )
 
     def _resolve_explicit_node(self, explicit_nodes, node_coordinates, sampler):
@@ -351,6 +297,7 @@ class RouteGraph:
         node_coordinates,
         sampler,
         landmarks=None,
+        roundtrip=None,
     ):
         """Resolve endpoints and return the shortest route inspection traversal."""
         if (
@@ -359,6 +306,9 @@ class RouteGraph:
         ):
             return None
 
+        if roundtrip is None:
+            roundtrip = self._route_relation.get('roundtrip', False)
+        roundtrip = str(roundtrip).strip().lower() in ('1', 'true', 'yes')
         node_roles = self._route_relation.get('node_roles', {})
         explicit_start_nodes = node_roles.get('start', [])
         explicit_finish_nodes = node_roles.get('end', [])
@@ -378,102 +328,53 @@ class RouteGraph:
             return None
 
         if start_node is not None:
-            traversal = self._shortest_traversal_from(start_node, finish_node)
+            finish_nodes = (
+                [finish_node]
+                if finish_node is not None
+                else [start_node]
+                if roundtrip
+                else sorted(self._graph)
+            )
+            traversal = self._shortest_traversal_from(start_node, finish_nodes)
             if traversal is None:
                 return None
             walk, _, traversal_finish = traversal
             return start_node, walk, traversal_finish
 
         if finish_node is not None:
-            traversal = self._shortest_traversal_from(
-                finish_node,
-                allowed_finish_nodes=self._start_candidates(),
-            )
+            traversal = self._shortest_traversal_from(finish_node, sorted(self._graph))
             if traversal is None:
                 return None
             walk, _, inferred_start = traversal
             return inferred_start, list(reversed(walk)), finish_node
 
-        landmark_index = self._landmark_index(landmarks)
-        odd_nodes = self._odd_nodes()
-        start_candidates = self._start_candidates()
-        best_landmark_by_node = self._best_landmark_by_node(
-            self._landmark_candidates(
-                landmark_index,
-                set(odd_nodes) & start_candidates,
-            ),
-        )
-        endpoint_candidates = self._shortest_open_endpoint_candidates(
-            best_landmark_by_node,
-            start_candidates,
-        )
-        if not endpoint_candidates:
-            landmark_candidates = self._landmark_candidates(landmark_index, start_candidates)
-            start = (
-                min(landmark_candidates, key=self._landmark_sort_key)['node_id']
-                if landmark_candidates
-                else self._default_start_node(start_candidates)
-            )
-            traversal = self._shortest_traversal_to(start, start)
+        line_endpoints = self._simple_line_endpoints()
+        if line_endpoints:
+            start = self._default_start_node(line_endpoints)
+            finish = next(node_id for node_id in line_endpoints if node_id != start)
+            traversal = self._shortest_traversal_to(start, finish)
             if traversal is None:
                 return None
             return start, traversal[0], traversal[2]
 
-        shortest_distance = min(
-            candidate['distance_m']
-            for candidate in endpoint_candidates
-        )
-        maximum_distance = shortest_distance * (1 + NEAR_SHORTEST_TRAVERSAL_TOLERANCE)
-        endpoint_candidates = [
-            candidate
-            for candidate in endpoint_candidates
-            if candidate['distance_m'] <= maximum_distance + 1e-6
-        ]
-        endpoint_nodes = {
-            node_id
-            for candidate in endpoint_candidates
-            for node_id in (candidate['first_node'], candidate['second_node'])
-        }
-        best_landmark_by_node = {
-            node_id: candidate
-            for node_id, candidate in best_landmark_by_node.items()
-            if node_id in endpoint_nodes
-        }
-        default_start = self._default_start_node(set(odd_nodes))
+        eligible_nodes = self._externally_accessible_nodes()
+        if not eligible_nodes:
+            return None
+        landmark_nodes = self._route_landmark_nodes(landmarks)
+        start = self._best_endpoint(eligible_nodes, landmark_nodes, is_start=True)
 
-        oriented_candidates = []
-        for candidate in endpoint_candidates:
-            for start, finish in (
-                (candidate['first_node'], candidate['second_node']),
-                (candidate['second_node'], candidate['first_node']),
-            ):
-                if start not in start_candidates:
-                    continue
-                landmark = best_landmark_by_node.get(start)
-                if landmark is not None:
-                    selection_key = (
-                        0,
-                        self._landmark_sort_key(landmark),
-                        candidate['distance_m'],
-                        start,
-                        finish,
-                    )
-                else:
-                    selection_key = (
-                        1,
-                        candidate['distance_m'],
-                        0 if start == default_start else 1,
-                        start,
-                        finish,
-                    )
-                oriented_candidates.append((
-                    selection_key,
-                    start,
-                    finish,
-                ))
-
-        _, start, finish = min(oriented_candidates)
-        traversal = self._shortest_traversal_to(start, finish)
+        finish_nodes = [start]
+        if self._odd_nodes() and not roundtrip:
+            finish_nodes.extend(sorted(
+                eligible_nodes - {start},
+                key=lambda node_id: self._endpoint_score(
+                    node_id,
+                    landmark_nodes,
+                    is_start=False,
+                ),
+                reverse=True,
+            ))
+        traversal = self._shortest_traversal_from(start, finish_nodes)
         if traversal is None:
             return None
         return start, traversal[0], traversal[2]
@@ -485,145 +386,31 @@ class RouteGraph:
             if degree % 2
         )
 
-    def _start_candidates(self):
-        graph_nodes = set(self._graph)
-        return self._externally_reachable_nodes & graph_nodes or graph_nodes
+    def _externally_accessible_nodes(self):
+        return self._externally_reachable_nodes & set(self._graph)
 
-    def _shortest_open_endpoint_candidates(self, landmarks_by_node, start_candidates):
-        odd_nodes = self._odd_nodes()
-        if len(odd_nodes) < 2:
-            return []
-
-        reachable_odd_nodes = sorted(set(odd_nodes) & start_candidates)
-        if not reachable_odd_nodes:
-            return []
-
-        required_distance = self._edge_distance_m()
-        global_matching = self._matching_paths(
-            odd_nodes,
-            (reachable_odd_nodes, odd_nodes),
-        )
-        if global_matching is None:
-            return []
-
-        paths, simple_graph, endpoint_pair = global_matching
-        endpoint_pair = tuple(endpoint_pair)
-        shortest_distance = required_distance + self._matching_distance(paths, simple_graph)
-        maximum_distance = shortest_distance * (1 + NEAR_SHORTEST_TRAVERSAL_TOLERANCE)
-        endpoint_pair_set = set(endpoint_pair)
-        candidates = [{
-            'first_node': endpoint_pair[0],
-            'second_node': endpoint_pair[1],
-            'distance_m': shortest_distance,
-        }]
-        global_landmark_key = min(
-            (
-                self._landmark_sort_key(landmarks_by_node[node_id])
-                for node_id in endpoint_pair
-                if node_id in landmarks_by_node
-            ),
-            default=None,
-        )
-        landmark_starts = sorted(
-            (
-                node_id
-                for node_id in landmarks_by_node
-                if node_id not in endpoint_pair_set
-            ),
-            key=lambda node_id: (
-                self._landmark_sort_key(landmarks_by_node[node_id]),
-                node_id,
-            ),
-        )
-        for start_node in landmark_starts:
-            if (
-                global_landmark_key is not None
-                and self._landmark_sort_key(landmarks_by_node[start_node]) >= global_landmark_key
-            ):
-                break
-            traversal = self._shortest_open_traversal_from(start_node)
-            if traversal is None or traversal[1] > maximum_distance + 1e-6:
-                continue
-            candidates.append({
-                'first_node': start_node,
-                'second_node': traversal[2],
-                'distance_m': traversal[1],
-            })
-            break
-        return candidates
+    def _simple_line_endpoints(self):
+        simple_graph = self._simple_weighted_graph()
+        endpoints = self._graph_endpoints(set(simple_graph))
+        if len(endpoints) == 2 and all(simple_graph.degree(node_id) <= 2 for node_id in simple_graph):
+            return endpoints
+        return None
 
     def _default_start_node(self, nodes):
-        ordered_nodes = [
-            node_id
-            for first_node, last_node in self._relation_way_endpoints
-            for node_id in (first_node, last_node)
-        ]
-        ordered_nodes.extend(self._route_relation.get('node_ids', ()))
-        relation_node_order = {}
-        for order, node_id in enumerate(ordered_nodes):
-            relation_node_order.setdefault(node_id, order)
-        return min(
-            nodes,
-            key=lambda node_id: (
-                relation_node_order.get(node_id) is None,
-                relation_node_order.get(node_id, 0),
-                node_id,
-            ),
-        )
+        return min(nodes, key=self._relation_node_order.__getitem__)
 
     def _landmark_index(self, landmarks):
         if landmarks is None or isinstance(landmarks, LandmarkIndex):
             return landmarks
         return LandmarkIndex(landmarks)
 
-    def _free_finish_nodes(self, start_node):
-        return [
-            node_id
-            for node_id in self._odd_nodes()
-            if node_id != start_node
-        ]
-
-    def _shortest_traversal_from(
-        self,
-        start_node,
-        finish_node=None,
-        allowed_finish_nodes=None,
-    ):
-        if finish_node is not None:
-            candidates = [self._shortest_traversal_to(start_node, finish_node)]
-        else:
-            candidates = []
-            if allowed_finish_nodes is None or start_node in allowed_finish_nodes:
-                candidates.append(self._shortest_traversal_to(start_node, start_node))
-            free_finish_nodes = self._free_finish_nodes(start_node)
-            if allowed_finish_nodes is not None:
-                free_finish_nodes = [
-                    node_id
-                    for node_id in free_finish_nodes
-                    if node_id in allowed_finish_nodes
-                ]
-            if free_finish_nodes:
-                candidates.append(self._shortest_traversal_to(
-                    start_node,
-                    None,
-                    free_finish_nodes,
-                ))
-        candidates = [candidate for candidate in candidates if candidate is not None]
-        return min(candidates, key=lambda candidate: candidate[1]) if candidates else None
-
-    def _shortest_open_traversal_from(self, start_node):
-        matching_nodes = [node_id for node_id in self._odd_nodes() if node_id != start_node]
-        matching_result = self._matching_paths(matching_nodes, (matching_nodes,))
-        if matching_result is None:
-            return None
-        paths, simple_graph, finish_node = matching_result
-        if finish_node is None:
-            return None
-        return (
-            start_node,
-            self._edge_distance_m() + self._matching_distance(paths, simple_graph),
-            finish_node,
-        )
+    def _shortest_traversal_from(self, start_node, finish_nodes):
+        shortest = None
+        for finish_node in finish_nodes:
+            traversal = self._shortest_traversal_to(start_node, finish_node)
+            if traversal is not None and (shortest is None or traversal[1] < shortest[1]):
+                shortest = traversal
+        return shortest
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -649,11 +436,11 @@ class RouteGraph:
             (way_id, way_nodes.get(way_id, []))
             for way_id in self._route_relation['way_ids']
         ]
-        self._relation_way_endpoints = [
-            (nodes[0][0], nodes[-1][0])
-            for _, nodes in relation_way_nodes
-            if len(nodes) >= 2
-        ]
+        for node_id in self._route_relation.get('node_ids', ()):
+            self._relation_node_order.setdefault(node_id, len(self._relation_node_order))
+        for _, nodes in relation_way_nodes:
+            for node_id, _ in nodes:
+                self._relation_node_order.setdefault(node_id, len(self._relation_node_order))
         node_way_ids = {}
         for way_id, nodes in relation_way_nodes:
             for node_id, _ in nodes:
@@ -773,7 +560,7 @@ class RouteGraph:
             for _, _, attributes in self._graph.edges(data=True)
         )
 
-    def _matching_paths(self, nodes, free_finish_node_groups=None):
+    def _matching_paths(self, nodes):
         simple_graph = self._simple_weighted_graph()
         matching_graph = nx.Graph()
         matching_graph.add_nodes_from(nodes)
@@ -789,38 +576,15 @@ class RouteGraph:
                     weight=shortest_distances[first_node][second_node],
                 )
 
-        dummy_nodes = []
-        if free_finish_node_groups:
-            for free_finish_nodes in free_finish_node_groups:
-                dummy_node = object()
-                dummy_nodes.append(dummy_node)
-                matching_graph.add_node(dummy_node)
-                for finish_index, finish_node in enumerate(free_finish_nodes):
-                    matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-12)
-
         matching = nx.min_weight_matching(matching_graph, weight='weight')
         if len(matching) * 2 != len(matching_graph):
             return None
 
         paths = []
-        selected_finishes = []
         for pair in matching:
             first_node, second_node = tuple(pair)
-            if first_node in dummy_nodes:
-                selected_finishes.append(second_node)
-                continue
-            if second_node in dummy_nodes:
-                selected_finishes.append(first_node)
-                continue
             paths.append(shortest_paths[first_node][second_node])
-        selected_finish = (
-            None
-            if not selected_finishes
-            else selected_finishes[0]
-            if len(selected_finishes) == 1
-            else tuple(sorted(selected_finishes))
-        )
-        return paths, simple_graph, selected_finish
+        return paths, simple_graph
 
     @staticmethod
     def _matching_distance(paths, simple_graph):
@@ -830,30 +594,15 @@ class RouteGraph:
             for first_node, second_node in zip(path, path[1:])
         )
 
-    def _shortest_traversal_to(self, start_node, finish_node, free_finish_nodes=None):
+    def _shortest_traversal_to(self, start_node, finish_node):
         odd_nodes = {node_id for node_id, degree in self._graph.degree() if degree % 2}
-        if free_finish_nodes is None:
-            target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
-            matching_nodes = odd_nodes ^ target_odd_nodes
-        else:
-            matching_nodes = odd_nodes ^ {start_node}
-        free_finish_node_groups = (
-            (free_finish_nodes,)
-            if free_finish_nodes is not None
-            else None
-        )
-        paths_result = self._matching_paths(
-            sorted(matching_nodes),
-            free_finish_node_groups,
-        )
+        target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
+        matching_nodes = odd_nodes ^ target_odd_nodes
+        paths_result = self._matching_paths(sorted(matching_nodes))
         if paths_result is None:
             return None
 
-        paths, simple_graph, selected_finish = paths_result
-        if free_finish_nodes is not None:
-            finish_node = selected_finish
-            if finish_node is None:
-                return None
+        paths, simple_graph = paths_result
         augmented_graph = self._graph.copy()
         for path in paths:
             for first_node, second_node in zip(path, path[1:]):

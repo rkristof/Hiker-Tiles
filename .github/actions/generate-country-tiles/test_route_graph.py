@@ -1,6 +1,5 @@
 import io
 import json
-import math
 import os
 import sys
 import tempfile
@@ -276,16 +275,12 @@ class RouteGraphTests(unittest.TestCase):
         self.assertIsNone(metadata[0]['finish_lon'])
         self.assertEqual(FakeElevation.instances[-1].route_calls, 0)
 
-    def test_landmark_categories_use_distance_tiers(self):
+    def test_landmark_catalog_contains_only_highest_tier(self):
         highest = landmark_candidate({'information': 'guidepost'})
-        direct_access = landmark_candidate({'amenity': 'parking'})
-        transport_access = landmark_candidate({'highway': 'bus_stop'})
 
-        self.assertEqual((highest['category'], highest['distance_limit_m']), (LandmarkCategory.HIGHEST, 30))
-        self.assertEqual((direct_access['category'], direct_access['distance_limit_m']), (LandmarkCategory.HIGH, 60))
-        self.assertEqual((transport_access['category'], transport_access['distance_limit_m']), (LandmarkCategory.MEDIUM, 90))
-        self.assertGreater(LandmarkCategory.HIGHEST, LandmarkCategory.HIGH)
-        self.assertGreater(LandmarkCategory.HIGH, LandmarkCategory.MEDIUM)
+        self.assertEqual(highest['category'], LandmarkCategory.HIGHEST)
+        self.assertIsNone(landmark_candidate({'amenity': 'parking'}))
+        self.assertIsNone(landmark_candidate({'highway': 'bus_stop'}))
 
     def test_landmark_collection_only_targets_relations_without_start(self):
         class Tag:
@@ -311,13 +306,20 @@ class RouteGraphTests(unittest.TestCase):
             collector.relation(Relation(
                 2,
                 [Member('n', 20, 'start'), Member('w', 11)],
-                [Tag('type', 'route'), Tag('route', 'hiking'), Tag('from', 'A'), Tag('to', 'B')],
+                [
+                    Tag('type', 'route'),
+                    Tag('route', 'hiking'),
+                    Tag('from', 'A'),
+                    Tag('to', 'B'),
+                    Tag('roundtrip', 'yes'),
+                ],
             ))
 
         self.assertFalse(collector.relations[1]['node_roles'].get('start'))
         self.assertTrue(collector.relations[2]['node_roles'].get('start'))
         self.assertEqual(collector.relations[2]['node_ids'], [20])
         self.assertEqual(collector.relations[2]['name'], 'A - B')
+        self.assertTrue(collector.relations[2]['roundtrip'])
 
     def test_flatten_nested_routes_merges_recursive_children_and_suppresses_them(self):
         class Tag:
@@ -456,9 +458,23 @@ class RouteGraphTests(unittest.TestCase):
             {1: {10}},
         )
 
-    def test_missing_endpoints_select_landmark_start_on_closed_route(self):
+    def test_inferred_simple_line_uses_ordered_leaves(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+            2: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            3: [(3, [0.0020, 0.0000]), (4, [0.0040, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        start, steps, finish = graph.shortest_route({}, None)
+
+        self.assertEqual((start, finish), (1, 4))
+        self.assertEqual(graph.traversal_coordinates(start, steps)[-1], graph.point(finish))
+
+    def test_inferred_closed_loop_uses_accessible_landmark_start(self):
         relation = {
-            'name': 'Gyadai tanösvény',
+            'name': 'Gyadai tanosveny route',
             'way_ids': [1, 2, 3],
             'node_roles': {},
         }
@@ -467,131 +483,81 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = routes.RouteGraph(relation, way_nodes, {1, 2})
 
-        start, _, finish = graph.shortest_route(
+        start, steps, finish = graph.shortest_route(
             {},
             None,
             [{
-                'category': LandmarkCategory.HIGH,
-                'distance_limit_m': 60,
-                'name': 'Gyadai tanösvény kezdőpontja',
+                'category': LandmarkCategory.HIGHEST,
+                'name': 'Gyadai tanosveny route entrance',
                 'points': [[0.0010, 0.0000]],
             }],
         )
 
-        self.assertEqual(start, 2)
-        self.assertEqual(finish, start)
-        self.assertIn(start, graph._graph)
+        self.assertEqual((start, finish), (2, 2))
+        self.assertEqual(graph.traversal_coordinates(start, steps)[-1], graph.point(finish))
 
-    def test_missing_endpoints_use_relation_order_for_equal_landmarks(self):
+    def test_inferred_branch_roundtrip_uses_landmark_start(self):
         relation = {
-            'name': 'Route',
-            'way_ids': [1, 2, 3],
-            'node_ids': [1, 3, 4],
-        }
-        way_nodes = {
-            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
-            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
-            3: [(2, [0.0010, 0.0000]), (4, [0.0010, 0.0010])],
-        }
-        graph = routes.RouteGraph(relation, way_nodes)
-
-        start, _, _ = graph.shortest_route(
-            {},
-            None,
-            [
-                {
-                    'node_id': 1,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.00004, 0.0000]],
-                },
-                {
-                    'node_id': 3,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.0020, 0.0000]],
-                },
-            ],
-        )
-
-        self.assertEqual(start, 1)
-
-    def test_missing_endpoints_ignore_incidental_landmark_at_non_endpoint(self):
-        relation = {
-            'name': 'Route',
-            'way_ids': [1, 2, 3],
-            'node_ids': [1, 3],
-            'node_roles': {},
-        }
-        way_nodes = {
-            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
-            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
-            3: [(3, [0.0020, 0.0000]), (4, [0.0030, 0.0000])],
-        }
-        graph = routes.RouteGraph(relation, way_nodes)
-
-        start, _, finish = graph.shortest_route(
-            {},
-            None,
-            [
-                {
-                    'node_id': 1,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.00004, 0.0000]],
-                },
-                {
-                    'node_id': 99,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.00102, 0.0000]],
-                },
-            ],
-        )
-
-        self.assertEqual(start, 1)
-        self.assertEqual(finish, 4)
-
-    def test_missing_endpoints_use_landmark_distance_for_start(self):
-        relation = {
-            'name': 'Route',
+            'name': 'Branch route',
+            'roundtrip': True,
             'way_ids': [1, 2, 3],
             'node_roles': {},
         }
         way_nodes = {
-            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
-            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
-            3: [(2, [0.0010, 0.0000]), (4, [0.0010, 0.0010])],
+            1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0000])],
+            2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
+            3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {1, 3})
+
+        start, steps, finish = graph.shortest_route(
+            {},
+            None,
+            [{
+                'category': LandmarkCategory.HIGHEST,
+                'name': 'Branch route trailhead',
+                'points': [[-0.0010, 0.0000]],
+            }],
+        )
+
+        self.assertEqual((start, finish), (3, 3))
+        self.assertEqual(graph.traversal_coordinates(start, steps)[-1], graph.point(finish))
+
+    def test_inferred_branch_open_uses_shortest_accessible_finish(self):
+        relation = {
+            'name': 'Branch route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0000])],
+            2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
+            3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {1, 2, 3})
+
+        start, steps, finish = graph.shortest_route({}, None)
+
+        self.assertEqual((start, finish), (1, 3))
+        self.assertEqual(graph.traversal_coordinates(start, steps)[-1], graph.point(finish))
+
+    def test_inferred_branch_without_access_has_no_endpoint(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0000])],
+            2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
+            3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
         }
         graph = routes.RouteGraph(relation, way_nodes)
 
-        start, _, _ = graph.shortest_route(
-            {},
-            None,
-            [
-                {
-                    'node_id': 1,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.00020, 0.0000]],
-                },
-                {
-                    'node_id': 3,
-                    'category': LandmarkCategory.HIGHEST,
-                    'distance_limit_m': 30,
-                    'points': [[0.0020, 0.0000]],
-                },
-            ],
-        )
-
-        self.assertEqual(start, 3)
+        self.assertIsNone(graph.shortest_route({}, None))
 
     def test_landmark_index_returns_only_nearby_points(self):
         index = LandmarkIndex([
-            {'points': [[0.0000, 0.0000]], 'distance_limit_m': 30},
-            {'points': [[0.0100, 0.0000]], 'distance_limit_m': 30},
+            {'points': [[0.0000, 0.0000]]},
+            {'points': [[0.0100, 0.0000]]},
         ])
 
         nearby = list(index.nearby([0.0001, 0.0000]))
@@ -610,14 +576,13 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = routes.RouteGraph(relation, way_nodes, {1})
 
         start, _, _ = graph.shortest_route(
             {},
             None,
             [{
                 'category': LandmarkCategory.HIGHEST,
-                'distance_limit_m': 30,
                 'points': [[0.00128, 0.0000]],
             }],
         )
@@ -690,7 +655,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(finish, 4)
         self.assertEqual(graph._graph.degree(start), 1)
 
-    def test_external_access_restricts_start_and_splits_route_way(self):
+    def test_simple_line_uses_leaves_even_when_access_is_internal(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
             1: [
@@ -704,13 +669,13 @@ class RouteGraphTests(unittest.TestCase):
         start, steps, finish = graph.shortest_route({}, None)
 
         self.assertIn(2, graph._graph)
-        self.assertEqual((start, finish), (2, 2))
+        self.assertEqual((start, finish), (1, 3))
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
         )
 
-    def test_external_access_restricts_inferred_orientation(self):
+    def test_simple_line_uses_osm_order_over_access_heuristic(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
@@ -720,8 +685,8 @@ class RouteGraphTests(unittest.TestCase):
 
         start, steps, finish = graph.shortest_route({}, None)
 
-        self.assertEqual(start, 3)
-        self.assertEqual(finish, 1)
+        self.assertEqual(start, 1)
+        self.assertEqual(finish, 3)
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
@@ -747,50 +712,13 @@ class RouteGraphTests(unittest.TestCase):
             3: [(0, [0.0000, 0.0000]), (3, [0.0010, 0.0000])],
             4: [(0, [0.0000, 0.0000]), (4, [-0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = routes.RouteGraph(relation, way_nodes, {3, 4})
 
         with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths:
             start, steps, finish = graph.shortest_route({}, None)
 
         self.assertEqual((start, finish), (3, 4))
         self.assertEqual(matching_paths.call_count, 2)
-        self.assertEqual(
-            graph.traversal_coordinates(start, steps)[-1],
-            graph.point(finish),
-        )
-
-    def test_landmark_endpoint_search_scales_by_landmark_starts(self):
-        leaf_count = 8
-        relation = {
-            'way_ids': list(range(1, leaf_count + 1)),
-            'node_roles': {},
-        }
-        leaf_points = {
-            leaf: [
-                0.0001 * math.cos(2 * math.pi * leaf / leaf_count),
-                0.0001 * math.sin(2 * math.pi * leaf / leaf_count),
-            ]
-            for leaf in range(1, leaf_count + 1)
-        }
-        way_nodes = {
-            leaf: [(0, [0.0, 0.0]), (leaf, leaf_points[leaf])]
-            for leaf in range(1, leaf_count + 1)
-        }
-        landmarks = routes.LandmarkIndex([
-            {
-                'node_id': leaf,
-                'category': LandmarkCategory.HIGHEST,
-                'distance_limit_m': 30,
-                'points': [leaf_points[leaf]],
-            }
-            for leaf in range(1, leaf_count + 1)
-        ])
-        graph = routes.RouteGraph(relation, way_nodes)
-
-        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths:
-            start, steps, finish = graph.shortest_route({}, None, landmarks)
-
-        self.assertLessEqual(matching_paths.call_count, 3)
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
@@ -814,38 +742,6 @@ class RouteGraphTests(unittest.TestCase):
         self.assertIn([0.001, 0.001], path)
         self.assertIn([0.001, -0.001], path)
         self.assertEqual(len(steps), 6)
-
-    def test_missing_endpoints_use_landmark_within_ten_percent(self):
-        relation = {
-            'name': 'Route',
-            'way_ids': [1, 2, 3, 4],
-            'node_roles': {},
-        }
-        way_nodes = {
-            1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0000])],
-            2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
-            3: [(0, [0.0000, 0.0000]), (3, [-0.0009, 0.0000])],
-            4: [(0, [0.0000, 0.0000]), (4, [0.0000, -0.0009])],
-        }
-        graph = routes.RouteGraph(relation, way_nodes)
-
-        selected_start, steps, selected_finish = graph.shortest_route(
-            {},
-            None,
-            [{
-                'node_id': 3,
-                'category': LandmarkCategory.HIGHEST,
-                'distance_limit_m': 30,
-                'points': [[-0.0009, 0.0000]],
-            }],
-        )
-
-        self.assertEqual(selected_start, 3)
-        self.assertIn(selected_finish, (1, 2))
-        self.assertEqual(
-            graph.traversal_coordinates(selected_start, steps)[-1],
-            graph.point(selected_finish),
-        )
 
     def test_matching_reuses_shortest_path_cache(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
@@ -893,6 +789,7 @@ class RouteGraphTests(unittest.TestCase):
         relation = {
             'way_ids': [2, 3, 4, 1, 1, 5, 6, 6],
             'node_roles': {'start': [1]},
+            'roundtrip': True,
         }
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
@@ -902,7 +799,7 @@ class RouteGraphTests(unittest.TestCase):
             5: [(3, [0.0010, 0.0010]), (5, [0.0020, 0.0010])],
             6: [(2, [0.0010, 0.0000]), (6, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = routes.RouteGraph(relation, way_nodes, {1})
 
         start, steps, finish = graph.shortest_route({}, None)
         path = graph.traversal_coordinates(start, steps)
@@ -922,7 +819,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(3, [0.0010, 0.0010]), (4, [0.0000, 0.0010])],
             4: [(4, [0.0000, 0.0010]), (2, [0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = routes.RouteGraph(relation, way_nodes, {1})
 
         start, steps, finish = graph.shortest_route({}, None)
         path = graph.traversal_coordinates(start, steps)
@@ -1064,7 +961,11 @@ class RouteGraphTests(unittest.TestCase):
                     int(node_id): point
                     for node_id, point in case.get('node_coordinates', {}).items()
                 }
-                graph = routes.RouteGraph(relation, way_nodes)
+                graph = routes.RouteGraph(
+                    relation,
+                    way_nodes,
+                    case.get('externally_reachable_nodes'),
+                )
                 graph.repair_disconnected_components(sampler)
                 landmark_data = case.get('landmarks')
                 if landmark_data is None and 'landmark' in case:
@@ -1087,7 +988,6 @@ class RouteGraphTests(unittest.TestCase):
 
                 self.assertEqual(path[-1], graph.point(traversal_finish))
                 self.assertEqual(result, case['expected'])
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -106,6 +106,7 @@ class WayRouteCollector(osmium.SimpleHandler):
             'network': self._network_group(tags.get('network', '')),
             'symbol': self._route_symbol(tags, os.environ['SYMBOL_TAG']),
             'difficulty': self._route_difficulty(os.environ['COUNTRY'], tags),
+            'roundtrip': tags.get('roundtrip', '').strip().lower() in ('1', 'true', 'yes'),
         }
         node_roles = {}
         for member in relation.members:
