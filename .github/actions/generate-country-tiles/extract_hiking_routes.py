@@ -1,5 +1,6 @@
 import json
 import os
+from array import array
 
 import osmium
 
@@ -297,49 +298,56 @@ class HighwayAccessCollector(osmium.SimpleHandler):
     def __init__(self, route_node_ids):
         super().__init__()
         self.route_node_ids = set(route_node_ids)
-        self._way_parent = {}
-        self._way_rank = {}
-        self._component_has_access = {}
-        self._way_id_by_node = {}
-        self._route_way_ids_by_node = {}
+        self._way_ids = array('q')
+        self._way_parent = array('I')
+        self._way_rank = bytearray()
+        self._component_has_access = bytearray()
+        self._way_index_by_node = {}
+        self._route_way_indices_by_node = {}
 
     def way(self, way):
         highway_type = way.tags.get('highway')
         if highway_type is None:
             return
-        self._way_parent[way.id] = way.id
-        self._way_rank[way.id] = 0
-        self._component_has_access[way.id] = highway_type in ACCESS_HIGHWAY_TYPES
+        way_index = len(self._way_ids)
+        self._way_ids.append(way.id)
+        self._way_parent.append(way_index)
+        self._way_rank.append(0)
+        self._component_has_access.append(
+            highway_type in ACCESS_HIGHWAY_TYPES
+        )
         for node in way.nodes:
             if node.ref in self.route_node_ids:
-                self._route_way_ids_by_node.setdefault(node.ref, set()).add(way.id)
-            previous_way_id = self._way_id_by_node.get(node.ref)
-            if previous_way_id is None:
-                self._way_id_by_node[node.ref] = way.id
+                self._route_way_indices_by_node.setdefault(node.ref, []).append(
+                    way_index
+                )
+            previous_way_index = self._way_index_by_node.get(node.ref)
+            if previous_way_index is None:
+                self._way_index_by_node[node.ref] = way_index
             else:
-                self._union(way.id, previous_way_id)
+                self._union(way_index, previous_way_index)
 
     def accessible_highway_way_ids_by_node(self):
         accessible_way_ids_by_node = {}
-        for node_id, way_ids in self._route_way_ids_by_node.items():
+        for node_id, way_indices in self._route_way_indices_by_node.items():
             accessible_way_ids = {
-                way_id
-                for way_id in way_ids
-                if self._component_has_access[self._find(way_id)]
+                self._way_ids[way_index]
+                for way_index in way_indices
+                if self._component_has_access[self._find(way_index)]
             }
             if accessible_way_ids:
                 accessible_way_ids_by_node[node_id] = accessible_way_ids
         return accessible_way_ids_by_node
 
-    def _find(self, way_id):
-        while self._way_parent[way_id] != way_id:
-            self._way_parent[way_id] = self._way_parent[self._way_parent[way_id]]
-            way_id = self._way_parent[way_id]
-        return way_id
+    def _find(self, way_index):
+        while self._way_parent[way_index] != way_index:
+            self._way_parent[way_index] = self._way_parent[self._way_parent[way_index]]
+            way_index = self._way_parent[way_index]
+        return way_index
 
-    def _union(self, first_way_id, second_way_id):
-        first_root = self._find(first_way_id)
-        second_root = self._find(second_way_id)
+    def _union(self, first_way_index, second_way_index):
+        first_root = self._find(first_way_index)
+        second_root = self._find(second_way_index)
         if first_root == second_root:
             return
         if self._way_rank[first_root] < self._way_rank[second_root]:

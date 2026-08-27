@@ -411,17 +411,57 @@ class RouteGraph:
         return LandmarkIndex(landmarks)
 
     def _shortest_traversal_from(self, start_node, finish_nodes):
-        shortest = None
-        for finish_node in finish_nodes:
-            traversal_data = self._shortest_traversal_data_to(start_node, finish_node)
-            if traversal_data is not None and (
-                shortest is None or traversal_data[2] < shortest[1][2]
-            ):
-                shortest = finish_node, traversal_data
-        if shortest is None:
+        finish_nodes = list(finish_nodes)
+        if not finish_nodes:
             return None
-        finish_node, traversal_data = shortest
-        return self._build_traversal(start_node, finish_node, traversal_data)
+        if len(finish_nodes) == 1:
+            finish_node = finish_nodes[0]
+            traversal_data = self._shortest_traversal_data_to(
+                start_node,
+                finish_node,
+            )
+            return (
+                None
+                if traversal_data is None
+                else self._build_traversal(
+                    start_node,
+                    finish_node,
+                    traversal_data,
+                )
+            )
+
+        finish_node_set = set(finish_nodes)
+        candidates = []
+        odd_nodes = set(self._odd_nodes())
+        if start_node in finish_node_set:
+            traversal_data = self._shortest_traversal_data_to(start_node, start_node)
+            if traversal_data is not None:
+                candidates.append((start_node, traversal_data))
+
+        open_finish_nodes = [
+            node_id
+            for node_id in finish_nodes
+            if node_id != start_node and node_id in odd_nodes
+        ]
+        if open_finish_nodes:
+            traversal_data = self._shortest_open_traversal_data_from(
+                start_node,
+                open_finish_nodes,
+            )
+            if traversal_data is not None:
+                candidates.append((traversal_data[3], traversal_data[:3]))
+
+        if not candidates:
+            return None
+        traversal_data = min(
+            candidates,
+            key=lambda candidate: candidate[1][2],
+        )
+        return self._build_traversal(
+            start_node,
+            traversal_data[0],
+            traversal_data[1],
+        )
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -575,7 +615,7 @@ class RouteGraph:
             )
         return self._edge_distance_cache
 
-    def _matching_paths(self, nodes):
+    def _matching_paths(self, nodes, free_finish_nodes=None):
         simple_graph = self._simple_weighted_graph()
         matching_graph = nx.Graph()
         matching_graph.add_nodes_from(nodes)
@@ -591,14 +631,36 @@ class RouteGraph:
                     weight=shortest_distances[first_node][second_node],
                 )
 
+        dummy_node = None
+        if free_finish_nodes:
+            dummy_node = object()
+            matching_graph.add_node(dummy_node)
+            for finish_index, finish_node in enumerate(free_finish_nodes):
+                matching_graph.add_edge(
+                    dummy_node,
+                    finish_node,
+                    weight=finish_index * 1e-12,
+                )
+
         matching = nx.min_weight_matching(matching_graph, weight='weight')
         if len(matching) * 2 != len(matching_graph):
             return None
 
         paths = []
+        selected_finish = None
         for pair in matching:
             first_node, second_node = tuple(pair)
+            if dummy_node is not None and first_node is dummy_node:
+                selected_finish = second_node
+                continue
+            if dummy_node is not None and second_node is dummy_node:
+                selected_finish = first_node
+                continue
             paths.append(shortest_paths[first_node][second_node])
+        if free_finish_nodes:
+            if selected_finish is None:
+                return None
+            return paths, simple_graph, selected_finish
         return paths, simple_graph
 
     @staticmethod
@@ -616,7 +678,7 @@ class RouteGraph:
         return self._build_traversal(start_node, finish_node, traversal_data)
 
     def _shortest_traversal_data_to(self, start_node, finish_node):
-        odd_nodes = {node_id for node_id, degree in self._graph.degree() if degree % 2}
+        odd_nodes = set(self._odd_nodes())
         target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
         matching_nodes = odd_nodes ^ target_odd_nodes
         paths_result = self._matching_paths(sorted(matching_nodes))
@@ -626,6 +688,16 @@ class RouteGraph:
         paths, simple_graph = paths_result
         distance = self._edge_distance_m() + self._matching_distance(paths, simple_graph)
         return paths, simple_graph, distance
+
+    def _shortest_open_traversal_data_from(self, start_node, finish_nodes):
+        matching_nodes = sorted(set(self._odd_nodes()) ^ {start_node})
+        paths_result = self._matching_paths(matching_nodes, finish_nodes)
+        if paths_result is None:
+            return None
+
+        paths, simple_graph, finish_node = paths_result
+        distance = self._edge_distance_m() + self._matching_distance(paths, simple_graph)
+        return paths, simple_graph, distance, finish_node
 
     def _build_traversal(self, start_node, finish_node, traversal_data):
         paths, simple_graph, distance = traversal_data
