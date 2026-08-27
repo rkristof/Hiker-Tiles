@@ -273,12 +273,6 @@ class RouteGraph:
         order = self._relation_node_order[node_id]
         return (node_id in landmark_nodes, -order if is_start else order)
 
-    def _best_endpoint(self, nodes, landmark_nodes, is_start):
-        return max(
-            nodes,
-            key=lambda node_id: self._endpoint_score(node_id, landmark_nodes, is_start),
-        )
-
     def _resolve_explicit_node(self, explicit_nodes, node_coordinates, sampler):
         if len(explicit_nodes) != 1:
             return None
@@ -365,22 +359,49 @@ class RouteGraph:
         if not eligible_nodes:
             return None
         landmark_nodes = self._route_landmark_nodes(landmarks)
-        start = self._best_endpoint(eligible_nodes, landmark_nodes, is_start=True)
-
-        finish_nodes = [start]
-        if self._odd_nodes() and not roundtrip:
-            finish_nodes.extend(sorted(
-                eligible_nodes - {start},
-                key=lambda node_id: self._endpoint_score(
-                    node_id,
-                    landmark_nodes,
-                    is_start=False,
+        finish_nodes = sorted(
+            eligible_nodes,
+            key=lambda node_id: self._endpoint_score(
+                node_id,
+                landmark_nodes,
+                is_start=False,
+            ),
+            reverse=True,
+        )
+        traversals = [
+            (
+                start_node,
+                self._shortest_traversal_from(
+                    start_node,
+                    [start_node] if roundtrip else finish_nodes,
                 ),
-                reverse=True,
-            ))
-        traversal = self._shortest_traversal_from(start, finish_nodes)
-        if traversal is None:
+            )
+            for start_node in eligible_nodes
+        ]
+        traversals = [
+            (start_node, traversal)
+            for start_node, traversal in traversals
+            if traversal is not None
+        ]
+        if not traversals:
             return None
+
+        shortest_distance = min(
+            traversal[1]
+            for _, traversal in traversals
+        )
+        start, traversal = max(
+            (
+                (start_node, traversal)
+                for start_node, traversal in traversals
+                if traversal[1] <= shortest_distance * 1.1
+            ),
+            key=lambda candidate: self._endpoint_score(
+                candidate[0],
+                landmark_nodes,
+                is_start=True,
+            ),
+        )
         return start, traversal[0], traversal[2]
 
     def _odd_nodes(self):

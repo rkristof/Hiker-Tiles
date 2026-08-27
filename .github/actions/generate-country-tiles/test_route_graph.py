@@ -554,6 +554,37 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertIsNone(graph.shortest_route({}, None))
 
+    def test_inferred_graph_ranks_starts_within_ten_percent(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(2, [0.0010, 0.0000]), (4, [0.0010, -0.0010])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {1, 3, 4})
+        distances = {1: 111, 3: 100, 4: 109}
+
+        def shortest_traversal(start_node, finish_nodes):
+            return [], distances[start_node], start_node
+
+        for roundtrip in (False, True):
+            with self.subTest(roundtrip=roundtrip), patch.object(
+                graph,
+                '_shortest_traversal_from',
+                side_effect=shortest_traversal,
+            ) as shortest_traversal_from:
+                start, _, finish = graph.shortest_route(
+                    {},
+                    None,
+                    roundtrip=roundtrip,
+                )
+
+            self.assertEqual((start, finish), (3, 3))
+            self.assertEqual(
+                {call.args[0] for call in shortest_traversal_from.call_args_list},
+                {1, 3, 4},
+            )
+
     def test_landmark_index_returns_only_nearby_points(self):
         index = LandmarkIndex([
             {'points': [[0.0000, 0.0000]]},
@@ -719,8 +750,8 @@ class RouteGraphTests(unittest.TestCase):
             start, steps, finish = graph.shortest_route({}, None)
 
         self.assertEqual((start, finish), (3, 4))
-        self.assertEqual(matching_paths.call_count, 2)
-        self.assertEqual(eulerian_path.call_count, 1)
+        self.assertEqual(matching_paths.call_count, 4)
+        self.assertEqual(eulerian_path.call_count, 2)
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
