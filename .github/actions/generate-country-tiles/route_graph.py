@@ -392,10 +392,7 @@ class RouteGraph:
         best_landmark_by_node = self._best_landmark_by_node(
             self._landmark_candidates(landmark_index, odd_nodes),
         )
-        endpoint_candidates = self._shortest_open_endpoint_candidates(
-            odd_nodes,
-            best_landmark_by_node,
-        )
+        endpoint_candidates = self._shortest_open_endpoint_candidates(best_landmark_by_node)
         if not endpoint_candidates:
             start_candidates = set(self._graph.nodes)
             landmark_candidates = self._landmark_candidates(landmark_index, start_candidates)
@@ -473,7 +470,8 @@ class RouteGraph:
             if degree % 2
         )
 
-    def _shortest_open_endpoint_candidates(self, odd_nodes, landmarks_by_node):
+    def _shortest_open_endpoint_candidates(self, landmarks_by_node):
+        odd_nodes = self._odd_nodes()
         if len(odd_nodes) < 2:
             return []
 
@@ -521,7 +519,7 @@ class RouteGraph:
                 and self._landmark_sort_key(landmarks_by_node[start_node]) >= global_landmark_key
             ):
                 break
-            traversal = self._shortest_open_traversal_from(start_node, odd_nodes)
+            traversal = self._shortest_open_traversal_from(start_node)
             if traversal is None or traversal[1] > maximum_distance + 1e-6:
                 continue
             candidates.append({
@@ -579,8 +577,8 @@ class RouteGraph:
         candidates = [candidate for candidate in candidates if candidate is not None]
         return min(candidates, key=lambda candidate: candidate[1]) if candidates else None
 
-    def _shortest_open_traversal_from(self, start_node, odd_nodes):
-        matching_nodes = [node_id for node_id in odd_nodes if node_id != start_node]
+    def _shortest_open_traversal_from(self, start_node):
+        matching_nodes = [node_id for node_id in self._odd_nodes() if node_id != start_node]
         matching_result = self._matching_paths(matching_nodes, matching_nodes)
         if matching_result is None:
             return None
