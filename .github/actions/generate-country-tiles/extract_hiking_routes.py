@@ -20,6 +20,18 @@ NETWORK_RANK = {
     'lwn': 3,
 }
 ROUTE_TYPES = ('hiking', 'foot', 'mtb')
+ACCESS_HIGHWAY_TYPES = frozenset((
+    'motorway',
+    'trunk',
+    'primary',
+    'secondary',
+    'tertiary',
+    'unclassified',
+    'residential',
+    'living_street',
+    'service',
+    'road',
+))
 PROPOSED_STATES = frozenset(('planned', 'proposed'))
 INACTIVE_STATES = frozenset((
     'abandoned',
@@ -284,18 +296,63 @@ class HighwayAccessCollector(osmium.SimpleHandler):
     def __init__(self, route_node_ids):
         super().__init__()
         self.route_node_ids = set(route_node_ids)
-        self.highway_way_ids_by_node = {}
+        self._way_parent = {}
+        self._way_rank = {}
+        self._component_has_access = {}
+        self._way_id_by_node = {}
+        self._route_way_ids_by_node = {}
 
     def way(self, way):
+        highway_type = way.tags.get('highway')
+        if highway_type is None:
+            return
+        self._way_parent[way.id] = way.id
+        self._way_rank[way.id] = 0
+        self._component_has_access[way.id] = highway_type in ACCESS_HIGHWAY_TYPES
         for node in way.nodes:
             if node.ref in self.route_node_ids:
-                self.highway_way_ids_by_node.setdefault(node.ref, set()).add(way.id)
+                self._route_way_ids_by_node.setdefault(node.ref, set()).add(way.id)
+            previous_way_id = self._way_id_by_node.get(node.ref)
+            if previous_way_id is None:
+                self._way_id_by_node[node.ref] = way.id
+            else:
+                self._union(way.id, previous_way_id)
+
+    def accessible_highway_way_ids_by_node(self):
+        accessible_way_ids_by_node = {}
+        for node_id, way_ids in self._route_way_ids_by_node.items():
+            accessible_way_ids = {
+                way_id
+                for way_id in way_ids
+                if self._component_has_access[self._find(way_id)]
+            }
+            if accessible_way_ids:
+                accessible_way_ids_by_node[node_id] = accessible_way_ids
+        return accessible_way_ids_by_node
+
+    def _find(self, way_id):
+        while self._way_parent[way_id] != way_id:
+            self._way_parent[way_id] = self._way_parent[self._way_parent[way_id]]
+            way_id = self._way_parent[way_id]
+        return way_id
+
+    def _union(self, first_way_id, second_way_id):
+        first_root = self._find(first_way_id)
+        second_root = self._find(second_way_id)
+        if first_root == second_root:
+            return
+        if self._way_rank[first_root] < self._way_rank[second_root]:
+            first_root, second_root = second_root, first_root
+        self._way_parent[second_root] = first_root
+        self._component_has_access[first_root] |= self._component_has_access[second_root]
+        if self._way_rank[first_root] == self._way_rank[second_root]:
+            self._way_rank[first_root] += 1
 
 
 def collect_highway_way_ids_by_node(pbf_path, route_node_ids):
     collector = HighwayAccessCollector(route_node_ids)
     collector.apply_file(pbf_path)
-    return collector.highway_way_ids_by_node
+    return collector.accessible_highway_way_ids_by_node()
 
 
 class GeoJSONExporter(osmium.SimpleHandler):

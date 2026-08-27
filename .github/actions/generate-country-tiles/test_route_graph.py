@@ -425,13 +425,36 @@ class RouteGraphTests(unittest.TestCase):
                 self.ref = node_id
 
         class Way:
-            id = 20
-            nodes = [Node(1), Node(2)]
+            def __init__(self, way_id, highway_type, node_ids):
+                self.id = way_id
+                self.tags = {'highway': highway_type}
+                self.nodes = [Node(node_id) for node_id in node_ids]
 
         collector = routes.HighwayAccessCollector({2})
-        collector.way(Way())
+        collector.way(Way(20, 'residential', [1, 2]))
 
-        self.assertEqual(collector.highway_way_ids_by_node, {2: {20}})
+        self.assertEqual(collector.accessible_highway_way_ids_by_node(), {2: {20}})
+
+    def test_highway_access_collector_connects_paths_to_access_highways(self):
+        class Node:
+            def __init__(self, node_id):
+                self.ref = node_id
+
+        class Way:
+            def __init__(self, way_id, highway_type, node_ids):
+                self.id = way_id
+                self.tags = {'highway': highway_type}
+                self.nodes = [Node(node_id) for node_id in node_ids]
+
+        collector = routes.HighwayAccessCollector({1, 4})
+        collector.way(Way(10, 'path', [1, 2]))
+        collector.way(Way(20, 'residential', [2, 3]))
+        collector.way(Way(30, 'path', [4, 5]))
+
+        self.assertEqual(
+            collector.accessible_highway_way_ids_by_node(),
+            {1: {10}},
+        )
 
     def test_missing_endpoints_select_landmark_start_on_closed_route(self):
         relation = {
