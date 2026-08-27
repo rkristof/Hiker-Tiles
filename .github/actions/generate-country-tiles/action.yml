@@ -67,8 +67,9 @@ runs:
         COUNTRY: ${{ inputs.country }}
         SYMBOL_TAG: ${{ inputs.symbol_tag }}
       run: |
-        # Pre-filter the full PBF to route relations, access highways, landmarks,
-        # and natural point nodes. This keeps both Python passes fast.
+        # Keep route geometry and access highways in separate files. Highway
+        # node references are enough for access detection; their coordinates
+        # must not reach the route exporter.
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
           n/checkpoint=hiking \
@@ -78,14 +79,15 @@ runs:
           n/highway=bus_stop n/public_transport=platform \
           n/public_transport=stop_position n/railway=station n/railway=halt \
           n/aerialway=station \
-          w/highway \
           w/parking=entrance w/entrance=main w/amenity=parking \
           w/tourism=visitor_centre \
           n/natural=peak n/natural=cave_entrance n/natural=volcano \
           -o tiles-filtered.osm.pbf
+        osmium tags-filter -R tiles-latest.osm.pbf w/highway \
+          -o highways-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
         python3 .github/actions/generate-country-tiles/extract_hiking_routes.py
-        rm -rf tiles-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+        rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
         echo "Natural points: $(wc -l < natural-points.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
         echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"

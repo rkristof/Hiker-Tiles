@@ -114,6 +114,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             node_coordinates={},
+            highway_way_ids_by_node={},
             landmark_index=None,
         )
 
@@ -186,6 +187,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             node_coordinates={},
+            highway_way_ids_by_node={},
             landmark_index=None,
         )
 
@@ -248,6 +250,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             node_coordinates={},
+            highway_way_ids_by_node={},
             landmark_index=None,
         )
 
@@ -369,7 +372,7 @@ class RouteGraphTests(unittest.TestCase):
     def test_landmark_collection_skips_irrelevant_way_geometry(self):
         class Way:
             id = 10
-            tags = []
+            tags = {}
 
             @property
             def nodes(self):
@@ -380,29 +383,17 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(exporter.landmarks, [])
 
-    def test_highway_access_nodes_are_recorded_for_route_nodes(self):
-        class Tag:
-            def __init__(self, key, value):
-                self.k = key
-                self.v = value
-
+    def test_node_coordinates_are_retained_only_for_relation_nodes(self):
         class Node:
-            def __init__(self, node_id, point):
-                self.ref = node_id
-                self.lon, self.lat = point
+            id = 1
+            lon = 19.0
+            lat = 47.0
+            tags = {}
 
-        class Way:
-            id = 20
-            tags = [Tag('highway', 'path')]
-            nodes = [
-                Node(1, [0.0, 0.0]),
-                Node(2, [0.001, 0.0]),
-            ]
+        exporter = routes.GeoJSONExporter({}, io.StringIO(), relation_node_ids={1})
+        exporter.node(Node())
 
-        exporter = routes.GeoJSONExporter({}, io.StringIO(), route_node_ids={2})
-        exporter.way(Way())
-
-        self.assertEqual(exporter.highway_way_ids_by_node, {2: {20}})
+        self.assertEqual(exporter.node_coordinates, {1: [19.0, 47.0]})
 
     def test_external_access_nodes_exclude_current_route_ways(self):
         access_way_ids_by_node = {
@@ -412,9 +403,35 @@ class RouteGraphTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            routes.find_external_access_nodes(access_way_ids_by_node, [10]),
+            routes.find_external_access_nodes(access_way_ids_by_node, [10], {1, 2, 3}),
             {2, 3},
         )
+
+    def test_external_access_nodes_can_be_limited_to_relation_nodes(self):
+        access_way_ids_by_node = {
+            1: {10},
+            2: {10, 20},
+            3: {20},
+        }
+
+        self.assertEqual(
+            routes.find_external_access_nodes(access_way_ids_by_node, [10], {1, 2}),
+            {2},
+        )
+
+    def test_highway_access_collector_records_matching_route_nodes(self):
+        class Node:
+            def __init__(self, node_id):
+                self.ref = node_id
+
+        class Way:
+            id = 20
+            nodes = [Node(1), Node(2)]
+
+        collector = routes.HighwayAccessCollector({2})
+        collector.way(Way())
+
+        self.assertEqual(collector.highway_way_ids_by_node, {2: {20}})
 
     def test_missing_endpoints_select_landmark_start_on_closed_route(self):
         relation = {

@@ -280,38 +280,37 @@ class WayRouteCollector(osmium.SimpleHandler):
         return False
 
 
-class RouteNodeCollector(osmium.SimpleHandler):
-    def __init__(self, route_way_ids):
+class HighwayAccessCollector(osmium.SimpleHandler):
+    def __init__(self, route_node_ids):
         super().__init__()
-        self.route_way_ids = set(route_way_ids)
-        self.route_node_ids = set()
+        self.route_node_ids = set(route_node_ids)
+        self.highway_way_ids_by_node = {}
 
     def way(self, way):
-        if way.id in self.route_way_ids:
-            self.route_node_ids.update(node.ref for node in way.nodes)
+        for node in way.nodes:
+            if node.ref in self.route_node_ids:
+                self.highway_way_ids_by_node.setdefault(node.ref, set()).add(way.id)
 
 
-def route_way_ids(relations):
-    return {
-        way_id
-        for relation in relations.values()
-        for way_id in relation['way_ids']
-    }
-
-
-def collect_route_node_ids(pbf_path, route_way_ids):
-    collector = RouteNodeCollector(route_way_ids)
+def collect_highway_way_ids_by_node(pbf_path, route_node_ids):
+    collector = HighwayAccessCollector(route_node_ids)
     collector.apply_file(pbf_path)
-    return collector.route_node_ids
+    return collector.highway_way_ids_by_node
 
 
 class GeoJSONExporter(osmium.SimpleHandler):
-    def __init__(self, way_routes, points_file, collect_landmarks=False, route_node_ids=None):
+    def __init__(
+        self,
+        way_routes,
+        points_file,
+        collect_landmarks=False,
+        relation_node_ids=None,
+    ):
         super().__init__()
         self.way_routes = way_routes
         self.points_file = points_file
         self.collect_landmarks = collect_landmarks
-        self.route_node_ids = set(route_node_ids or ())
+        self.relation_node_ids = set(relation_node_ids or ())
         self.way_count = 0
         self.point_count = 0
         self.route_symbols = set()  # unique route symbol values seen
@@ -319,39 +318,46 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.way_groups_buffer = []  # buffered (coordinates, route_properties), merged after the pass
         self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
         self.node_coordinates = {}  # node_id -> coordinates for relation endpoint markers
-        self.highway_way_ids_by_node = {}
         self.landmarks = []  # candidate landmarks used only by relations without starts
         self.landmark_index = None
 
     def node(self, node):
+        tags = node.tags
+        landmark = landmark_candidate(tags) if self.collect_landmarks else None
+        point_properties = self._point_properties(tags)
+        needs_coordinates = (
+            node.id in self.relation_node_ids
+            or landmark is not None
+            or point_properties is not None
+        )
+        if not needs_coordinates:
+            return
         try:
-            self.node_coordinates[node.id] = [node.lon, node.lat]
+            point = [node.lon, node.lat]
         except osmium.InvalidLocationError:
             return
-        tags = {tag.k: tag.v for tag in node.tags}
-        if self.collect_landmarks:
-            landmark = landmark_candidate(tags)
-            if landmark is not None:
-                landmark['node_id'] = node.id
-                landmark['points'] = [[node.lon, node.lat]]
-                self.landmarks.append(landmark)
-        point_properties = self._point_properties(tags)
+        if node.id in self.relation_node_ids:
+            self.node_coordinates[node.id] = point
+        if landmark is not None:
+            landmark['node_id'] = node.id
+            landmark['points'] = [point]
+            self.landmarks.append(landmark)
         if point_properties is None:
             return
         write_feature(
             self.points_file,
-            {'type': 'Point', 'coordinates': [node.location.lon, node.location.lat]},
+            {'type': 'Point', 'coordinates': point},
             point_properties,
         )
         self.point_count += 1
 
     def way(self, way):
         route_attributes = self.way_routes.get(way.id)
-        tags = {tag.k: tag.v for tag in way.tags}
+        tags = way.tags
         landmark = None
         if self.collect_landmarks:
             landmark = landmark_candidate(tags)
-        if not route_attributes and landmark is None and 'highway' not in tags:
+        if not route_attributes and landmark is None:
             return
         try:
             nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
@@ -359,10 +365,6 @@ class GeoJSONExporter(osmium.SimpleHandler):
             return
         if len(nodes) < 2:
             return
-        if 'highway' in tags:
-            for node_id, _ in nodes:
-                if node_id in self.route_node_ids:
-                    self.highway_way_ids_by_node.setdefault(node_id, set()).add(way.id)
         if landmark is not None:
             landmark['way_id'] = way.id
             landmark['points'] = [point for _, point in nodes]
@@ -518,12 +520,13 @@ def write_route_layers(exporter):
         print(f'Symbol lines written: {symbol_feature_count} (from {len(symbol_groups)} merged chains)')
 
 
-def find_external_access_nodes(highway_way_ids_by_node, route_way_ids):
+def find_external_access_nodes(highway_way_ids_by_node, route_way_ids, candidate_node_ids):
     """Return route nodes touched by highway ways outside the current relation."""
     route_way_ids = set(route_way_ids)
     return {
         node_id
-        for node_id, way_ids in highway_way_ids_by_node.items()
+        for node_id in candidate_node_ids
+        for way_ids in (highway_way_ids_by_node.get(node_id, ()),)
         if any(way_id not in route_way_ids for way_id in way_ids)
     }
 
@@ -538,12 +541,23 @@ def export_route_features(collector):
             collector.way_routes,
             points_file,
             collect_landmarks=collect_landmarks,
-            route_node_ids=collect_route_node_ids(
-                'tiles-filtered.osm.pbf',
-                route_way_ids(collector.relations),
-            ),
+            relation_node_ids={
+                node_id
+                for route_relation in collector.relations.values()
+                for role in ('start', 'end')
+                for node_id in route_relation.get('node_roles', {}).get(role, ())
+            },
         )
         exporter.apply_file('tiles-filtered.osm.pbf', locations=True)
+        route_node_ids = {
+            node_id
+            for nodes in exporter.way_nodes.values()
+            for node_id, _ in nodes
+        }
+        exporter.highway_way_ids_by_node = collect_highway_way_ids_by_node(
+            'highways-filtered.osm.pbf',
+            route_node_ids,
+        )
         exporter.landmark_index = LandmarkIndex(exporter.landmarks) if collect_landmarks else None
         print(f'Route ways matched: {exporter.way_count}')
         print(f'Natural points written: {exporter.point_count}')
@@ -559,8 +573,13 @@ def write_route_lines(collector, exporter):
         with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
             for relation_id, route_relation in collector.relations.items():
                 external_access_nodes = find_external_access_nodes(
-                    getattr(exporter, 'highway_way_ids_by_node', {}),
+                    exporter.highway_way_ids_by_node,
                     route_relation['way_ids'],
+                    {
+                        node_id
+                        for way_id in route_relation['way_ids']
+                        for node_id, _ in exporter.way_nodes.get(way_id, ())
+                    },
                 )
                 route_graph = RouteGraph(
                     route_relation,
