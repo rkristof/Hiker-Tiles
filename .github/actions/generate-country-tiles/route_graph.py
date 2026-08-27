@@ -303,6 +303,15 @@ class RouteGraph:
             candidate['score'] = distance_score + order_score
         return candidates
 
+    def _best_landmark_by_node(self, candidates):
+        best_by_node = {}
+        for candidate in candidates:
+            node_id = candidate['node_id']
+            previous = best_by_node.get(node_id)
+            if previous is None or self._landmark_sort_key(candidate) < self._landmark_sort_key(previous):
+                best_by_node[node_id] = candidate
+        return best_by_node
+
     @staticmethod
     def _landmark_sort_key(candidate):
         return (
@@ -379,13 +388,17 @@ class RouteGraph:
             return inferred_start, list(reversed(walk)), finish_node
 
         landmark_index = self._landmark_index(landmarks)
-        endpoint_candidates = self._shortest_open_endpoint_candidates()
+        odd_nodes = self._odd_nodes()
+        best_landmark_by_node = self._best_landmark_by_node(
+            self._landmark_candidates(landmark_index, odd_nodes),
+        )
+        endpoint_candidates = self._shortest_open_endpoint_candidates(
+            odd_nodes,
+            best_landmark_by_node,
+        )
         if not endpoint_candidates:
             start_candidates = set(self._graph.nodes)
-            landmark_candidates = self._landmark_candidates(
-                landmark_index,
-                start_candidates,
-            )
+            landmark_candidates = self._landmark_candidates(landmark_index, start_candidates)
             start = (
                 min(landmark_candidates, key=self._landmark_sort_key)['node_id']
                 if landmark_candidates
@@ -411,14 +424,12 @@ class RouteGraph:
             for candidate in endpoint_candidates
             for node_id in (candidate['first_node'], candidate['second_node'])
         }
-        landmark_candidates = self._landmark_candidates(landmark_index, endpoint_nodes)
-        best_landmark_by_node = {}
-        for candidate in landmark_candidates:
-            node_id = candidate['node_id']
-            previous = best_landmark_by_node.get(node_id)
-            if previous is None or self._landmark_sort_key(candidate) < self._landmark_sort_key(previous):
-                best_landmark_by_node[node_id] = candidate
-        default_start = self._default_start_node(endpoint_nodes)
+        best_landmark_by_node = {
+            node_id: candidate
+            for node_id, candidate in best_landmark_by_node.items()
+            if node_id in endpoint_nodes
+        }
+        default_start = self._default_start_node(set(odd_nodes))
 
         oriented_candidates = []
         for candidate in endpoint_candidates:
@@ -455,28 +466,70 @@ class RouteGraph:
             return None
         return start, traversal[0], traversal[2]
 
-    def _shortest_open_endpoint_candidates(self):
-        odd_nodes = sorted(
+    def _odd_nodes(self):
+        return sorted(
             node_id
             for node_id, degree in self._graph.degree()
             if degree % 2
         )
-        if not odd_nodes:
+
+    def _shortest_open_endpoint_candidates(self, odd_nodes, landmarks_by_node):
+        if len(odd_nodes) < 2:
             return []
 
         required_distance = self._edge_distance_m()
-        candidates = []
-        for first_index, first_node in enumerate(odd_nodes):
-            for second_node in odd_nodes[first_index + 1:]:
-                matching_nodes = sorted(set(odd_nodes) - {first_node, second_node})
-                correction_distance = self._matching_cost(matching_nodes)
-                if correction_distance is None:
-                    continue
-                candidates.append({
-                    'first_node': first_node,
-                    'second_node': second_node,
-                    'distance_m': required_distance + correction_distance,
-                })
+        global_matching = self._matching_paths(
+            odd_nodes,
+            odd_nodes,
+            free_finish_count=2,
+        )
+        if global_matching is None:
+            return []
+
+        paths, simple_graph, endpoint_pair = global_matching
+        endpoint_pair = tuple(endpoint_pair)
+        shortest_distance = required_distance + self._matching_distance(paths, simple_graph)
+        maximum_distance = shortest_distance * (1 + NEAR_SHORTEST_TRAVERSAL_TOLERANCE)
+        endpoint_pair_set = set(endpoint_pair)
+        candidates = [{
+            'first_node': endpoint_pair[0],
+            'second_node': endpoint_pair[1],
+            'distance_m': shortest_distance,
+        }]
+        global_landmark_key = min(
+            (
+                self._landmark_sort_key(landmarks_by_node[node_id])
+                for node_id in endpoint_pair
+                if node_id in landmarks_by_node
+            ),
+            default=None,
+        )
+        landmark_starts = sorted(
+            (
+                node_id
+                for node_id in landmarks_by_node
+                if node_id not in endpoint_pair_set
+            ),
+            key=lambda node_id: (
+                self._landmark_sort_key(landmarks_by_node[node_id]),
+                node_id,
+            ),
+        )
+        for start_node in landmark_starts:
+            if (
+                global_landmark_key is not None
+                and self._landmark_sort_key(landmarks_by_node[start_node]) >= global_landmark_key
+            ):
+                break
+            traversal = self._shortest_open_traversal_from(start_node, odd_nodes)
+            if traversal is None or traversal[1] > maximum_distance + 1e-6:
+                continue
+            candidates.append({
+                'first_node': start_node,
+                'second_node': traversal[2],
+                'distance_m': traversal[1],
+            })
+            break
         return candidates
 
     def _default_start_node(self, nodes):
@@ -504,11 +557,11 @@ class RouteGraph:
         return LandmarkIndex(landmarks)
 
     def _free_finish_nodes(self, start_node):
-        return sorted(
+        return [
             node_id
-            for node_id, degree in self._graph.degree()
-            if node_id != start_node and degree % 2 == 1
-        )
+            for node_id in self._odd_nodes()
+            if node_id != start_node
+        ]
 
     def _shortest_traversal_from(self, start_node, finish_node=None):
         candidates = (
@@ -525,6 +578,20 @@ class RouteGraph:
         )
         candidates = [candidate for candidate in candidates if candidate is not None]
         return min(candidates, key=lambda candidate: candidate[1]) if candidates else None
+
+    def _shortest_open_traversal_from(self, start_node, odd_nodes):
+        matching_nodes = [node_id for node_id in odd_nodes if node_id != start_node]
+        matching_result = self._matching_paths(matching_nodes, matching_nodes)
+        if matching_result is None:
+            return None
+        paths, simple_graph, finish_node = matching_result
+        if finish_node is None:
+            return None
+        return (
+            start_node,
+            self._edge_distance_m() + self._matching_distance(paths, simple_graph),
+            finish_node,
+        )
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -673,7 +740,7 @@ class RouteGraph:
             for _, _, attributes in self._graph.edges(data=True)
         )
 
-    def _matching_paths(self, nodes, free_finish_nodes=None):
+    def _matching_paths(self, nodes, free_finish_nodes=None, free_finish_count=1):
         simple_graph = self._simple_weighted_graph()
         matching_graph = nx.Graph()
         matching_graph.add_nodes_from(nodes)
@@ -689,35 +756,41 @@ class RouteGraph:
                     weight=shortest_distances[first_node][second_node],
                 )
 
-        dummy_node = None
+        dummy_nodes = []
         if free_finish_nodes:
-            dummy_node = object()
-            matching_graph.add_node(dummy_node)
-            for finish_index, finish_node in enumerate(free_finish_nodes):
-                matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-12)
+            for _ in range(free_finish_count):
+                dummy_node = object()
+                dummy_nodes.append(dummy_node)
+                matching_graph.add_node(dummy_node)
+                for finish_index, finish_node in enumerate(free_finish_nodes):
+                    matching_graph.add_edge(dummy_node, finish_node, weight=finish_index * 1e-12)
 
         matching = nx.min_weight_matching(matching_graph, weight='weight')
         if len(matching) * 2 != len(matching_graph):
             return None
 
         paths = []
-        selected_finish = None
+        selected_finishes = []
         for pair in matching:
             first_node, second_node = tuple(pair)
-            if dummy_node is not None and first_node is dummy_node:
-                selected_finish = second_node
+            if first_node in dummy_nodes:
+                selected_finishes.append(second_node)
                 continue
-            if dummy_node is not None and second_node is dummy_node:
-                selected_finish = first_node
+            if second_node in dummy_nodes:
+                selected_finishes.append(first_node)
                 continue
             paths.append(shortest_paths[first_node][second_node])
+        selected_finish = (
+            None
+            if not selected_finishes
+            else selected_finishes[0]
+            if len(selected_finishes) == 1
+            else tuple(sorted(selected_finishes))
+        )
         return paths, simple_graph, selected_finish
 
-    def _matching_cost(self, nodes):
-        matching_result = self._matching_paths(nodes)
-        if matching_result is None:
-            return None
-        paths, simple_graph, _ = matching_result
+    @staticmethod
+    def _matching_distance(paths, simple_graph):
         return sum(
             simple_graph[first_node][second_node]['weight']
             for path in paths

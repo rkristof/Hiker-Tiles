@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -613,6 +614,63 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(finish, 4)
         self.assertEqual(graph._graph.degree(start), 1)
 
+    def test_open_endpoint_search_uses_global_matching(self):
+        relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
+        way_nodes = {
+            1: [(0, [0.0000, 0.0000]), (1, [0.0001, 0.0000])],
+            2: [(0, [0.0000, 0.0000]), (2, [-0.0001, 0.0000])],
+            3: [(0, [0.0000, 0.0000]), (3, [0.0010, 0.0000])],
+            4: [(0, [0.0000, 0.0000]), (4, [-0.0010, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths:
+            start, steps, finish = graph.shortest_route({}, None)
+
+        self.assertEqual((start, finish), (3, 4))
+        self.assertEqual(matching_paths.call_count, 2)
+        self.assertEqual(
+            graph.traversal_coordinates(start, steps)[-1],
+            graph.point(finish),
+        )
+
+    def test_landmark_endpoint_search_scales_by_landmark_starts(self):
+        leaf_count = 8
+        relation = {
+            'way_ids': list(range(1, leaf_count + 1)),
+            'node_roles': {},
+        }
+        leaf_points = {
+            leaf: [
+                0.0001 * math.cos(2 * math.pi * leaf / leaf_count),
+                0.0001 * math.sin(2 * math.pi * leaf / leaf_count),
+            ]
+            for leaf in range(1, leaf_count + 1)
+        }
+        way_nodes = {
+            leaf: [(0, [0.0, 0.0]), (leaf, leaf_points[leaf])]
+            for leaf in range(1, leaf_count + 1)
+        }
+        landmarks = routes.LandmarkIndex([
+            {
+                'node_id': leaf,
+                'category': LandmarkCategory.HIGHEST,
+                'distance_limit_m': 30,
+                'points': [leaf_points[leaf]],
+            }
+            for leaf in range(1, leaf_count + 1)
+        ])
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths:
+            start, steps, finish = graph.shortest_route({}, None, landmarks)
+
+        self.assertLessEqual(matching_paths.call_count, 3)
+        self.assertEqual(
+            graph.traversal_coordinates(start, steps)[-1],
+            graph.point(finish),
+        )
+
     def test_acyclic_branch_uses_open_traversal(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {'start': [1]}}
         way_nodes = {
@@ -678,8 +736,8 @@ class RouteGraphTests(unittest.TestCase):
             'route_graph.nx.single_source_dijkstra',
             wraps=route_graph.nx.single_source_dijkstra,
         ) as dijkstra:
-            graph._matching_cost([1, 2])
-            graph._matching_cost([1, 3])
+            graph._matching_paths([1, 2])
+            graph._matching_paths([1, 3])
 
         self.assertEqual(
             dijkstra.call_count,
