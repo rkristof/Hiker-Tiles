@@ -380,6 +380,42 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(exporter.landmarks, [])
 
+    def test_highway_access_nodes_are_recorded_for_route_nodes(self):
+        class Tag:
+            def __init__(self, key, value):
+                self.k = key
+                self.v = value
+
+        class Node:
+            def __init__(self, node_id, point):
+                self.ref = node_id
+                self.lon, self.lat = point
+
+        class Way:
+            id = 20
+            tags = [Tag('highway', 'path')]
+            nodes = [
+                Node(1, [0.0, 0.0]),
+                Node(2, [0.001, 0.0]),
+            ]
+
+        exporter = routes.GeoJSONExporter({}, io.StringIO(), route_node_ids={2})
+        exporter.way(Way())
+
+        self.assertEqual(exporter.highway_way_ids_by_node, {2: {20}})
+
+    def test_external_access_nodes_exclude_current_route_ways(self):
+        access_way_ids_by_node = {
+            1: {10},
+            2: {10, 20},
+            3: {20},
+        }
+
+        self.assertEqual(
+            routes.find_external_access_nodes(access_way_ids_by_node, [10]),
+            {2, 3},
+        )
+
     def test_missing_endpoints_select_landmark_start_on_closed_route(self):
         relation = {
             'name': 'Gyadai tanösvény',
@@ -613,6 +649,55 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(start, 1)
         self.assertEqual(finish, 4)
         self.assertEqual(graph._graph.degree(start), 1)
+
+    def test_external_access_restricts_start_and_splits_route_way(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0000]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {2})
+
+        start, steps, finish = graph.shortest_route({}, None)
+
+        self.assertIn(2, graph._graph)
+        self.assertEqual((start, finish), (2, 2))
+        self.assertEqual(
+            graph.traversal_coordinates(start, steps)[-1],
+            graph.point(finish),
+        )
+
+    def test_external_access_restricts_inferred_orientation(self):
+        relation = {'way_ids': [1, 2], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {3})
+
+        start, steps, finish = graph.shortest_route({}, None)
+
+        self.assertEqual(start, 3)
+        self.assertEqual(finish, 1)
+        self.assertEqual(
+            graph.traversal_coordinates(start, steps)[-1],
+            graph.point(finish),
+        )
+
+    def test_explicit_start_ignores_external_access_restriction(self):
+        relation = {'way_ids': [1, 2], 'node_roles': {'start': [1]}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
+        }
+        graph = routes.RouteGraph(relation, way_nodes, {3})
+
+        start, _, _ = graph.shortest_route({}, None)
+
+        self.assertEqual(start, 1)
 
     def test_open_endpoint_search_uses_global_matching(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
