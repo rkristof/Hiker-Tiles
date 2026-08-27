@@ -84,6 +84,8 @@ class RouteGraph:
         self._graph = nx.MultiGraph()
         self._simple_graph = None
         self._shortest_path_cache = {}
+        self._odd_nodes_cache = None
+        self._edge_distance_cache = None
         self._relation_node_order = {}
         self._build(way_nodes)
 
@@ -118,6 +120,8 @@ class RouteGraph:
             component_graph._graph = self._graph.subgraph(component).copy()
             component_graph._simple_graph = None
             component_graph._shortest_path_cache = {}
+            component_graph._odd_nodes_cache = None
+            component_graph._edge_distance_cache = None
             component_graph._relation_node_order = {
                 node_id: order
                 for node_id, order in self._relation_node_order.items()
@@ -380,11 +384,13 @@ class RouteGraph:
         return start, traversal[0], traversal[2]
 
     def _odd_nodes(self):
-        return sorted(
-            node_id
-            for node_id, degree in self._graph.degree()
-            if degree % 2
-        )
+        if self._odd_nodes_cache is None:
+            self._odd_nodes_cache = sorted(
+                node_id
+                for node_id, degree in self._graph.degree()
+                if degree % 2
+            )
+        return self._odd_nodes_cache
 
     def _externally_accessible_nodes(self):
         return self._externally_reachable_nodes & set(self._graph)
@@ -407,10 +413,15 @@ class RouteGraph:
     def _shortest_traversal_from(self, start_node, finish_nodes):
         shortest = None
         for finish_node in finish_nodes:
-            traversal = self._shortest_traversal_to(start_node, finish_node)
-            if traversal is not None and (shortest is None or traversal[1] < shortest[1]):
-                shortest = traversal
-        return shortest
+            traversal_data = self._shortest_traversal_data_to(start_node, finish_node)
+            if traversal_data is not None and (
+                shortest is None or traversal_data[2] < shortest[1][2]
+            ):
+                shortest = finish_node, traversal_data
+        if shortest is None:
+            return None
+        finish_node, traversal_data = shortest
+        return self._build_traversal(start_node, finish_node, traversal_data)
 
     def traversal_coordinates(self, start_node, steps):
         coordinates = [self.point(start_node)]
@@ -484,6 +495,8 @@ class RouteGraph:
 
         self._simple_graph = None
         self._shortest_path_cache = {}
+        self._odd_nodes_cache = None
+        self._edge_distance_cache = None
         self._graph.add_node(start_node, point=points[0])
         self._graph.add_node(end_node, point=points[-1])
         self._graph.add_edge(
@@ -555,10 +568,12 @@ class RouteGraph:
         )
 
     def _edge_distance_m(self):
-        return sum(
-            attributes['distance_m']
-            for _, _, attributes in self._graph.edges(data=True)
-        )
+        if self._edge_distance_cache is None:
+            self._edge_distance_cache = sum(
+                attributes['distance_m']
+                for _, _, attributes in self._graph.edges(data=True)
+            )
+        return self._edge_distance_cache
 
     def _matching_paths(self, nodes):
         simple_graph = self._simple_weighted_graph()
@@ -595,6 +610,12 @@ class RouteGraph:
         )
 
     def _shortest_traversal_to(self, start_node, finish_node):
+        traversal_data = self._shortest_traversal_data_to(start_node, finish_node)
+        if traversal_data is None:
+            return None
+        return self._build_traversal(start_node, finish_node, traversal_data)
+
+    def _shortest_traversal_data_to(self, start_node, finish_node):
         odd_nodes = {node_id for node_id, degree in self._graph.degree() if degree % 2}
         target_odd_nodes = set() if finish_node == start_node else {start_node, finish_node}
         matching_nodes = odd_nodes ^ target_odd_nodes
@@ -603,6 +624,11 @@ class RouteGraph:
             return None
 
         paths, simple_graph = paths_result
+        distance = self._edge_distance_m() + self._matching_distance(paths, simple_graph)
+        return paths, simple_graph, distance
+
+    def _build_traversal(self, start_node, finish_node, traversal_data):
+        paths, simple_graph, distance = traversal_data
         augmented_graph = self._graph.copy()
         for path in paths:
             for first_node, second_node in zip(path, path[1:]):
@@ -629,7 +655,6 @@ class RouteGraph:
                 keys=True,
             )
         ]
-        distance = sum(edge['distance_m'] for _, _, _, edge in walk)
         return walk, distance, finish_node
 
 

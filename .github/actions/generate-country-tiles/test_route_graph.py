@@ -714,11 +714,13 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes, {3, 4})
 
-        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths:
+        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths, \
+            patch('route_graph.nx.eulerian_path', wraps=route_graph.nx.eulerian_path) as eulerian_path:
             start, steps, finish = graph.shortest_route({}, None)
 
         self.assertEqual((start, finish), (3, 4))
         self.assertEqual(matching_paths.call_count, 2)
+        self.assertEqual(eulerian_path.call_count, 1)
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
