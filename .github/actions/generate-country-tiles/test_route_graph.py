@@ -564,26 +564,63 @@ class RouteGraphTests(unittest.TestCase):
         graph = routes.RouteGraph(relation, way_nodes, {1, 3, 4})
         distances = {1: 111, 3: 100, 4: 109}
 
-        def shortest_traversal(start_node, finish_nodes):
-            return [], distances[start_node], start_node
+        def shortest_traversal_data(start_node, finish_nodes):
+            return start_node, ([], distances[start_node])
 
-        for roundtrip in (False, True):
-            with self.subTest(roundtrip=roundtrip), patch.object(
-                graph,
-                '_shortest_traversal_from',
-                side_effect=shortest_traversal,
-            ) as shortest_traversal_from:
-                start, _, finish = graph.shortest_route(
-                    {},
-                    None,
-                    roundtrip=roundtrip,
-                )
+        def build_traversal(start_node, finish_node, traversal_data):
+            return [], traversal_data[1], finish_node
 
-            self.assertEqual((start, finish), (3, 3))
-            self.assertEqual(
-                {call.args[0] for call in shortest_traversal_from.call_args_list},
-                {1, 3, 4},
+        with patch.object(
+            graph,
+            '_shortest_traversal_data_from',
+            side_effect=shortest_traversal_data,
+        ) as shortest_traversal_data_from, patch.object(
+            graph,
+            '_build_traversal',
+            side_effect=build_traversal,
+        ):
+            start, _, finish = graph.shortest_route(
+                {},
+                None,
+                roundtrip=False,
             )
+
+        self.assertEqual((start, finish), (3, 3))
+        self.assertEqual(
+            {call_args.args[0] for call_args in shortest_traversal_data_from.call_args_list},
+            {1, 3, 4},
+        )
+
+    def test_inferred_graph_evaluates_only_ten_start_candidates(self):
+        relation = {
+            'way_ids': list(range(1, 13)),
+            'node_roles': {},
+        }
+        way_nodes = {
+            way_id: [
+                (0, [0.0000, 0.0000]),
+                (way_id, [way_id * 0.0001, 0.0000]),
+            ]
+            for way_id in relation['way_ids']
+        }
+        graph = routes.RouteGraph(relation, way_nodes, set(range(1, 13)))
+
+        with patch.object(
+            graph,
+            '_shortest_traversal_data_from',
+            return_value=(1, ([], 100)),
+        ) as shortest_traversal_data_from, patch.object(
+            graph,
+            '_build_traversal',
+            return_value=([], 100, 1),
+        ):
+            start, _, finish = graph.shortest_route({}, None, roundtrip=False)
+
+        self.assertEqual((start, finish), (1, 1))
+        self.assertEqual(
+            [call_args.args[0] for call_args in shortest_traversal_data_from.call_args_list],
+            list(range(1, 11)),
+        )
 
     def test_landmark_index_returns_only_nearby_points(self):
         index = LandmarkIndex([
@@ -745,13 +782,13 @@ class RouteGraphTests(unittest.TestCase):
         }
         graph = routes.RouteGraph(relation, way_nodes, {3, 4})
 
-        with patch.object(graph, '_matching_paths', wraps=graph._matching_paths) as matching_paths, \
+        with patch.object(graph, '_minimum_matching', wraps=graph._minimum_matching) as minimum_matching, \
             patch('route_graph.nx.eulerian_path', wraps=route_graph.nx.eulerian_path) as eulerian_path:
             start, steps, finish = graph.shortest_route({}, None)
 
         self.assertEqual((start, finish), (3, 4))
-        self.assertEqual(matching_paths.call_count, 4)
-        self.assertEqual(eulerian_path.call_count, 2)
+        self.assertEqual(minimum_matching.call_count, 4)
+        self.assertEqual(eulerian_path.call_count, 1)
         self.assertEqual(
             graph.traversal_coordinates(start, steps)[-1],
             graph.point(finish),
@@ -776,7 +813,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertIn([0.001, -0.001], path)
         self.assertEqual(len(steps), 6)
 
-    def test_matching_reuses_shortest_path_cache(self):
+    def test_matching_reuses_shortest_distance_cache(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
         way_nodes = {
             1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0000])],
@@ -787,11 +824,11 @@ class RouteGraphTests(unittest.TestCase):
         graph = routes.RouteGraph(relation, way_nodes)
 
         with patch(
-            'route_graph.nx.single_source_dijkstra',
-            wraps=route_graph.nx.single_source_dijkstra,
+            'route_graph.nx.single_source_dijkstra_path_length',
+            wraps=route_graph.nx.single_source_dijkstra_path_length,
         ) as dijkstra:
-            graph._matching_paths([1, 2])
-            graph._matching_paths([1, 3])
+            graph._minimum_matching([1, 2])
+            graph._minimum_matching([1, 3])
 
         self.assertEqual(
             dijkstra.call_count,
