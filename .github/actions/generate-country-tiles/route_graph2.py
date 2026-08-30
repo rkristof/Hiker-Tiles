@@ -91,6 +91,33 @@ class RouteGraph2:
     def has_edges(self):
         return self._graph.number_of_edges() > 0
 
+    def is_simple_line(self):
+        """Return whether the graph is one connected line without branches."""
+        if not self._graph or not nx.is_connected(self._graph):
+            return False
+        endpoints = [
+            node_id
+            for node_id, degree in self._graph.degree()
+            if degree == 1
+        ]
+        return len(endpoints) == 2 and all(
+            degree <= 2
+            for _, degree in self._graph.degree()
+        )
+
+    def simple_line_endpoints(self):
+        """Return simple-line start and end nodes in relation order."""
+        if not self.is_simple_line():
+            return None
+        endpoints = [
+            node_id
+            for node_id, degree in self._graph.degree()
+            if degree == 1
+        ]
+        start_node = min(endpoints, key=self._relation_node_order.__getitem__)
+        finish_node = next(node_id for node_id in endpoints if node_id != start_node)
+        return start_node, finish_node
+
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
 

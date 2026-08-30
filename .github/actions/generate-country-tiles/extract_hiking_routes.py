@@ -800,6 +800,7 @@ def write_route_lines2(collector, exporter):
                 if not route_graph.has_edges:
                     continue
 
+                traversal = None
                 if len(start_nodes) == 1 and len(finish_nodes) == 1:
                     traversal = route_graph.shortest_traversal(
                         start_nodes[0],
@@ -813,7 +814,11 @@ def write_route_lines2(collector, exporter):
                         else route_graph.shortest_traversal_to_nearest_finish(start_nodes[0])
                     )
                 else:
-                    continue
+                    if route_graph.is_simple_line():
+                        start_node, finish_node = route_graph.simple_line_endpoints()
+                        traversal = route_graph.shortest_traversal(start_node, finish_node)
+                    else:
+                        continue
 
                 if traversal is None:
                     continue
