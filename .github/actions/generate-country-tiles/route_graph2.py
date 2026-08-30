@@ -12,9 +12,11 @@ class RouteGraph2:
         way_nodes,
         eligible_nodes=None,
         sampler=None,
+        roundtrip=False,
     ):
         self._route_relation = route_relation
         self.eligible_nodes = set(eligible_nodes or ())
+        self._roundtrip = roundtrip
         self._relation_node_order = {}
         raw_graph = nx.MultiGraph()
 
@@ -46,46 +48,10 @@ class RouteGraph2:
 
         self._repair_disconnected_components(raw_graph, sampler)
 
-        retained_nodes = {
-            node_id
-            for node_id, degree in raw_graph.degree()
-            if degree == 1 or degree > 2
-        }
-        retained_nodes.update(
-            node_id
-            for role in ('start', 'end')
-            for node_id in route_relation.get('node_roles', {}).get(role, ())
-            if node_id in raw_graph
-        )
-        if not retained_nodes and raw_graph:
-            retained_nodes.add(next(iter(raw_graph)))
+        self._graph = self._create_simple_graph(raw_graph, route_relation)
 
-        self._graph = nx.Graph()
-        self._graph.add_nodes_from(
-            (node_id, raw_graph.nodes[node_id])
-            for node_id in retained_nodes
-        )
-
-        for start_node in retained_nodes:
-            while raw_graph.degree(start_node):
-                _, current_node, edge_key, edge_data = next(
-                    iter(raw_graph.edges(start_node, keys=True, data=True)),
-                )
-                raw_graph.remove_edge(start_node, current_node, edge_key)
-                edge_weight = edge_data['weight']
-
-                while current_node not in retained_nodes:
-                    _, next_node, next_edge_key, next_edge_data = next(
-                        iter(raw_graph.edges(current_node, keys=True, data=True)),
-                    )
-                    raw_graph.remove_edge(current_node, next_node, next_edge_key)
-                    edge_weight += next_edge_data['weight']
-                    current_node = next_node
-
-                if self._graph.has_edge(start_node, current_node):
-                    self._graph[start_node][current_node]['weight'] += edge_weight
-                else:
-                    self._graph.add_edge(start_node, current_node, weight=edge_weight)
+        if self._roundtrip and self._graph:
+            self._graph = nx.eulerize(self._graph)
 
     @property
     def has_edges(self):
@@ -118,16 +84,13 @@ class RouteGraph2:
         finish_node = next(node_id for node_id in endpoints if node_id != start_node)
         return start_node, finish_node
 
-    def is_closed_loop(self):
-        """Return whether the graph is one connected cycle."""
-        return bool(self._graph) and nx.is_connected(self._graph) and all(
-            degree == 2
-            for _, degree in self._graph.degree()
-        )
+    def is_eulerian(self):
+        """Return whether the graph supports a closed Eulerian traversal."""
+        return bool(self._graph) and nx.is_eulerian(self._graph)
 
     def closed_loop_start_node(self):
-        """Return a heuristic start node for a connected cycle."""
-        if not self.is_closed_loop():
+        """Return a heuristic start node for an Eulerian graph."""
+        if not self.is_eulerian():
             return None
         candidate_nodes = self.eligible_nodes & set(self._graph)
         return min(
@@ -147,31 +110,28 @@ class RouteGraph2:
         ):
             return None
 
-        eulerized_graph = nx.eulerize(self._graph)
         return [
             start_node,
             *(
                 second_node
                 for _, second_node in nx.eulerian_circuit(
-                    eulerized_graph,
+                    self._graph,
                     source=start_node,
                 )
             ),
         ]
 
-    def shortest_path_length(self):
-        """Return the shortest weighted path length between any two nodes."""
-        return min(
-            (
-                distance
-                for start_node, (distances, _) in nx.all_pairs_dijkstra(
-                    self._graph,
-                    weight='weight',
-                )
-                for finish_node, distance in distances.items()
-                if start_node != finish_node
-            ),
-            default=None,
+    def shortest_eulerian_cycle_length(self):
+        """Return the weighted length of the shortest Eulerian cycle."""
+        if not self._graph or not nx.is_connected(self._graph) or not nx.is_eulerian(self._graph):
+            return None
+
+        return sum(
+            self._graph[first_node][second_node][edge_key]['weight']
+            for first_node, second_node, edge_key in nx.eulerian_circuit(
+                self._graph,
+                keys=True,
+            )
         )
 
     def shortest_traversal(self, start_node, finish_node):
@@ -220,6 +180,51 @@ class RouteGraph2:
             edge_data['weight']
             for _, _, edge_data in self._graph.edges(data=True)
         )
+
+    @staticmethod
+    def _create_simple_graph(raw_graph, route_relation):
+        retained_nodes = {
+            node_id
+            for node_id, degree in raw_graph.degree()
+            if degree == 1 or degree > 2
+        }
+        retained_nodes.update(
+            node_id
+            for role in ('start', 'end')
+            for node_id in route_relation.get('node_roles', {}).get(role, ())
+            if node_id in raw_graph
+        )
+        if not retained_nodes and raw_graph:
+            retained_nodes.add(next(iter(raw_graph)))
+
+        simple_graph = nx.Graph()
+        simple_graph.add_nodes_from(
+            (node_id, raw_graph.nodes[node_id])
+            for node_id in retained_nodes
+        )
+
+        for start_node in retained_nodes:
+            while raw_graph.degree(start_node):
+                _, current_node, edge_key, edge_data = next(
+                    iter(raw_graph.edges(start_node, keys=True, data=True)),
+                )
+                raw_graph.remove_edge(start_node, current_node, edge_key)
+                edge_weight = edge_data['weight']
+
+                while current_node not in retained_nodes:
+                    _, next_node, next_edge_key, next_edge_data = next(
+                        iter(raw_graph.edges(current_node, keys=True, data=True)),
+                    )
+                    raw_graph.remove_edge(current_node, next_node, next_edge_key)
+                    edge_weight += next_edge_data['weight']
+                    current_node = next_node
+
+                if simple_graph.has_edge(start_node, current_node):
+                    simple_graph[start_node][current_node]['weight'] += edge_weight
+                else:
+                    simple_graph.add_edge(start_node, current_node, weight=edge_weight)
+
+        return simple_graph
 
     @classmethod
     def _repair_disconnected_components(cls, graph, sampler):

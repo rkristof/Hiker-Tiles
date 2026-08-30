@@ -783,6 +783,7 @@ def write_route_lines2(collector, exporter):
                 node_roles = route_relation.get('node_roles', {})
                 start_nodes = node_roles.get('start', ())
                 finish_nodes = node_roles.get('end', ())
+                roundtrip = route_relation.get('roundtrip', False)
                 eligible_node_finder = EligibleNodeFinder(
                     route_relation,
                     exporter.way_nodes,
@@ -794,12 +795,13 @@ def write_route_lines2(collector, exporter):
                     },
                     exporter.landmarks,
                 )
-                external_access_nodes = eligible_node_finder.rank_eligible_nodes()
+                eligible_nodes = eligible_node_finder.rank_eligible_nodes()
                 route_graph = RouteGraph2(
                     route_relation,
                     exporter.way_nodes,
-                    external_access_nodes,
+                    eligible_nodes,
                     sampler=elevation,
+                    roundtrip=roundtrip,
                 )
                 if not route_graph.has_edges:
                     continue
@@ -814,7 +816,6 @@ def write_route_lines2(collector, exporter):
                         else route_graph.shortest_traversal(start_node, finish_node)
                     )
                 elif len(start_nodes) == 1 and not finish_nodes:
-                    roundtrip = route_relation.get('roundtrip', False)
                     traversal = (
                         route_graph.eulerian_traversal(start_nodes[0])
                         if roundtrip
@@ -824,7 +825,8 @@ def write_route_lines2(collector, exporter):
                     start_node, finish_node = route_graph.simple_line_endpoints()
                     traversal = route_graph.shortest_traversal(start_node, finish_node)
                 else:
-                    if route_graph.is_closed_loop():
+                    if route_graph.is_eulerian():
+                        shortest_eulerian_cycle_length = route_graph.shortest_eulerian_cycle_length()
                         start_node = route_graph.closed_loop_start_node()
                         traversal = route_graph.eulerian_traversal(start_node)
                     else:
