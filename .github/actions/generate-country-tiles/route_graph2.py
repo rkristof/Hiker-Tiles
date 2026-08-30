@@ -10,11 +10,11 @@ class RouteGraph2:
         self,
         route_relation,
         way_nodes,
-        externally_reachable_nodes=None,
+        eligible_nodes=None,
         sampler=None,
     ):
         self._route_relation = route_relation
-        self._externally_reachable_nodes = set(externally_reachable_nodes or ())
+        self.eligible_nodes = set(eligible_nodes or ())
         self._relation_node_order = {}
         raw_graph = nx.MultiGraph()
 
@@ -129,7 +129,7 @@ class RouteGraph2:
         """Return a heuristic start node for a connected cycle."""
         if not self.is_closed_loop():
             return None
-        candidate_nodes = self._externally_reachable_nodes & set(self._graph)
+        candidate_nodes = self.eligible_nodes & set(self._graph)
         return min(
             candidate_nodes or self._graph,
             key=self._relation_node_order.__getitem__,

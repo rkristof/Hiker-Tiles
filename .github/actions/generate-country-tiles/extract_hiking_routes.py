@@ -4,6 +4,7 @@ from array import array
 
 import osmium
 
+from eligible_nodes import EligibleNodeFinder
 from elevation import Elevation, offset_elevation_profile
 from route_graph import LandmarkIndex, RouteGraph, landmark_candidate, polyline_distance_m
 from route_graph2 import RouteGraph2
@@ -782,15 +783,18 @@ def write_route_lines2(collector, exporter):
                 node_roles = route_relation.get('node_roles', {})
                 start_nodes = node_roles.get('start', ())
                 finish_nodes = node_roles.get('end', ())
-                external_access_nodes = find_external_access_nodes(
+                eligible_node_finder = EligibleNodeFinder(
+                    route_relation,
+                    exporter.way_nodes,
                     exporter.highway_way_ids_by_node,
-                    route_relation['way_ids'],
                     {
                         node_id
                         for way_id in route_relation['way_ids']
                         for node_id, _ in exporter.way_nodes.get(way_id, ())
                     },
+                    exporter.landmarks,
                 )
+                external_access_nodes = eligible_node_finder.rank_eligible_nodes()
                 route_graph = RouteGraph2(
                     route_relation,
                     exporter.way_nodes,
@@ -816,11 +820,11 @@ def write_route_lines2(collector, exporter):
                         if roundtrip
                         else route_graph.shortest_traversal_to_nearest_finish(start_nodes[0])
                     )
+                elif route_graph.is_simple_line():
+                    start_node, finish_node = route_graph.simple_line_endpoints()
+                    traversal = route_graph.shortest_traversal(start_node, finish_node)
                 else:
-                    if route_graph.is_simple_line():
-                        start_node, finish_node = route_graph.simple_line_endpoints()
-                        traversal = route_graph.shortest_traversal(start_node, finish_node)
-                    elif route_graph.is_closed_loop():
+                    if route_graph.is_closed_loop():
                         start_node = route_graph.closed_loop_start_node()
                         traversal = route_graph.eulerian_traversal(start_node)
                     else:
