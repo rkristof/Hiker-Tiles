@@ -159,6 +159,21 @@ class RouteGraph2:
             ),
         ]
 
+    def shortest_path_length(self):
+        """Return the shortest weighted path length between any two nodes."""
+        return min(
+            (
+                distance
+                for start_node, (distances, _) in nx.all_pairs_dijkstra(
+                    self._graph,
+                    weight='weight',
+                )
+                for finish_node, distance in distances.items()
+                if start_node != finish_node
+            ),
+            default=None,
+        )
+
     def shortest_traversal(self, start_node, finish_node):
         """Return a shortest path between two graph nodes."""
         if start_node not in self._graph or finish_node not in self._graph:
