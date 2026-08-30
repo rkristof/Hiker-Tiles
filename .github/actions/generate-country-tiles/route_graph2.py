@@ -15,10 +15,11 @@ class RouteGraph2:
         roundtrip=False,
     ):
         self._route_relation = route_relation
-        self.eligible_nodes = set(eligible_nodes or ())
+        self.eligible_nodes = tuple(dict.fromkeys(eligible_nodes or ()))
         self._roundtrip = roundtrip
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
+        self._complex_graph = None
 
         for node_id in route_relation.get('node_ids', ()):
             self._relation_node_order.setdefault(
@@ -46,12 +47,9 @@ class RouteGraph2:
                     weight=self._haversine_distance_m(first_point, second_point),
                 )
 
-        self._repair_disconnected_components(self._raw_graph, sampler)
+        self._repair_disconnected_components(sampler)
 
-        self._graph = self._create_simple_graph()
-
-        if self._roundtrip and self._graph:
-            self._graph = nx.eulerize(self._graph)
+        self._create_simple_graph()
 
     @property
     def has_edges(self):
@@ -92,7 +90,7 @@ class RouteGraph2:
         """Return a heuristic start node for an Eulerian graph."""
         if not self.is_eulerian():
             return None
-        candidate_nodes = self.eligible_nodes & set(self._graph)
+        candidate_nodes = set(self.eligible_nodes) & set(self._graph)
         return min(
             candidate_nodes or self._graph,
             key=self._relation_node_order.__getitem__,
@@ -100,6 +98,30 @@ class RouteGraph2:
 
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
+
+    def complex_eulerian_traversal(self):
+        """Return an Eulerian traversal from the first eligible graph node."""
+        graph = self._complex_graph
+        if not graph or not nx.is_connected(graph) or not nx.is_eulerian(graph):
+            return None
+
+        start_node = next(
+            (node_id for node_id in self.eligible_nodes if node_id in graph),
+            None,
+        )
+        if start_node is None:
+            return None
+
+        return [
+            start_node,
+            *(
+                second_node
+                for _, second_node in nx.eulerian_circuit(
+                    graph,
+                    source=start_node,
+                )
+            ),
+        ]
 
     def eulerian_traversal(self, start_node):
         """Return a closed traversal covering every graph edge."""
@@ -182,15 +204,22 @@ class RouteGraph2:
         )
 
     def _create_simple_graph(self):
-        return RouteGraph2._create_compressed_graph(self._raw_graph, self._route_relation)
+        self._graph = RouteGraph2._create_compressed_graph(
+            self._raw_graph,
+            self._route_relation,
+        )
+        if self._roundtrip and self._graph:
+            self._graph = nx.eulerize(self._graph)
 
     def _create_complex_graph(self):
         """Create a compressed graph that also retains eligible route nodes."""
-        return RouteGraph2._create_compressed_graph(
+        self._complex_graph = RouteGraph2._create_compressed_graph(
             self._raw_graph,
             self._route_relation,
             self.eligible_nodes,
         )
+        if self._roundtrip and self._complex_graph:
+            self._complex_graph = nx.eulerize(self._complex_graph)
 
     @staticmethod
     def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
@@ -243,9 +272,8 @@ class RouteGraph2:
 
         return simple_graph
 
-    @classmethod
-    def _repair_disconnected_components(cls, graph, sampler):
-        components = list(nx.connected_components(graph))
+    def _repair_disconnected_components(self, sampler):
+        components = list(nx.connected_components(self._raw_graph))
         if sampler is None or len(components) < 2:
             return
 
@@ -256,18 +284,18 @@ class RouteGraph2:
         }
         endpoints = [
             node_id
-            for node_id in graph
-            if graph.degree(node_id) == 1
+            for node_id in self._raw_graph
+            if self._raw_graph.degree(node_id) == 1
         ]
         elevations = {
-            node_id: sampler.sample(graph.nodes[node_id]['point'])
+            node_id: sampler.sample(self._raw_graph.nodes[node_id]['point'])
             for node_id in endpoints
         }
         candidates = {node_id: [] for node_id in endpoints}
         for first_index, first_node in enumerate(endpoints):
             if elevations[first_node] is None:
                 continue
-            first_point = graph.nodes[first_node]['point']
+            first_point = self._raw_graph.nodes[first_node]['point']
             for second_node in endpoints[first_index + 1:]:
                 if (
                     component_by_node[first_node]
@@ -277,9 +305,9 @@ class RouteGraph2:
                     continue
                 if abs(elevations[first_node] - elevations[second_node]) >= 15:
                     continue
-                distance = cls._haversine_distance_m(
+                distance = self._haversine_distance_m(
                     first_point,
-                    graph.nodes[second_node]['point'],
+                    self._raw_graph.nodes[second_node]['point'],
                 )
                 if distance >= 100:
                     continue
@@ -325,7 +353,7 @@ class RouteGraph2:
                 return
 
             distance, first_node, second_node = min(mutual)
-            graph.add_edge(
+            self._raw_graph.add_edge(
                 first_node,
                 second_node,
                 weight=distance,

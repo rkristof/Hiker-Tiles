@@ -807,6 +807,7 @@ def write_route_lines2(collector, exporter):
                     continue
 
                 traversal = None
+                traversal_graph = route_graph._graph
                 if len(start_nodes) == 1 and len(finish_nodes) == 1:
                     start_node = start_nodes[0]
                     finish_node = finish_nodes[0]
@@ -825,17 +826,20 @@ def write_route_lines2(collector, exporter):
                     start_node, finish_node = route_graph.simple_line_endpoints()
                     traversal = route_graph.shortest_traversal(start_node, finish_node)
                 else:
+                    route_graph._create_complex_graph()
                     if route_graph.is_eulerian():
-                        shortest_eulerian_cycle_length = route_graph.shortest_eulerian_cycle_length()
-                        start_node = route_graph.closed_loop_start_node()
-                        traversal = route_graph.eulerian_traversal(start_node)
+                        traversal = route_graph.complex_eulerian_traversal()
+                        traversal_graph = route_graph._complex_graph
                     else:
                         continue
 
                 if traversal is None:
                     continue
 
-                path = [route_graph.point(node_id) for node_id in traversal]
+                path = [
+                    traversal_graph.nodes[node_id]['point']
+                    for node_id in traversal
+                ]
                 write_feature(
                     route_lines_file,
                     {'type': 'LineString', 'coordinates': path},
