@@ -802,14 +802,17 @@ def write_route_lines2(collector, exporter):
 
                 traversal = None
                 if len(start_nodes) == 1 and len(finish_nodes) == 1:
-                    traversal = route_graph.shortest_traversal(
-                        start_nodes[0],
-                        finish_nodes[0],
+                    start_node = start_nodes[0]
+                    finish_node = finish_nodes[0]
+                    traversal = (
+                        route_graph.eulerian_traversal(start_node)
+                        if start_node == finish_node
+                        else route_graph.shortest_traversal(start_node, finish_node)
                     )
                 elif len(start_nodes) == 1 and not finish_nodes:
                     roundtrip = route_relation.get('roundtrip', False)
                     traversal = (
-                        route_graph.shortest_traversal(start_nodes[0], start_nodes[0])
+                        route_graph.eulerian_traversal(start_nodes[0])
                         if roundtrip
                         else route_graph.shortest_traversal_to_nearest_finish(start_nodes[0])
                     )
@@ -819,7 +822,7 @@ def write_route_lines2(collector, exporter):
                         traversal = route_graph.shortest_traversal(start_node, finish_node)
                     elif route_graph.is_closed_loop():
                         start_node = route_graph.closed_loop_start_node()
-                        traversal = route_graph.closed_loop_traversal(start_node)
+                        traversal = route_graph.eulerian_traversal(start_node)
                     else:
                         continue
 

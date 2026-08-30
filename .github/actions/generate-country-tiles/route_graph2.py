@@ -135,26 +135,32 @@ class RouteGraph2:
             key=self._relation_node_order.__getitem__,
         )
 
-    def closed_loop_traversal(self, start_node):
-        """Return a closed traversal of every edge from the start node."""
-        if not self.is_closed_loop() or start_node not in self._graph:
+    def point(self, node_id):
+        return self._graph.nodes[node_id]['point']
+
+    def eulerian_traversal(self, start_node):
+        """Return a closed traversal covering every graph edge."""
+        if (
+            start_node not in self._graph
+            or not self._graph
+            or not nx.is_connected(self._graph)
+        ):
             return None
+
+        eulerized_graph = nx.eulerize(self._graph)
         return [
             start_node,
             *(
                 second_node
                 for _, second_node in nx.eulerian_circuit(
-                    self._graph,
+                    eulerized_graph,
                     source=start_node,
                 )
             ),
         ]
 
-    def point(self, node_id):
-        return self._graph.nodes[node_id]['point']
-
     def shortest_traversal(self, start_node, finish_node):
-        """Return the weighted shortest traversal as an ordered node path."""
+        """Return a shortest path between two graph nodes."""
         if start_node not in self._graph or finish_node not in self._graph:
             return None
         try:
@@ -182,7 +188,7 @@ class RouteGraph2:
             if node_id != start_node and degree % 2
         ]
         if not finish_nodes:
-            finish_nodes = [start_node]
+            return self.eulerian_traversal(start_node)
 
         return min(
             (
