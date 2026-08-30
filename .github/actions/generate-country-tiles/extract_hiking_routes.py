@@ -6,6 +6,7 @@ import osmium
 
 from elevation import Elevation, offset_elevation_profile
 from route_graph import LandmarkIndex, RouteGraph, landmark_candidate, polyline_distance_m
+from route_graph2 import RouteGraph2
 
 
 NETWORK_GROUP_BY_TAG = {
@@ -771,6 +772,71 @@ def write_route_lines(collector, exporter):
         json.dump(route_metadata, metadata_file)
     print(f'Route lines: {len(route_metadata)} routes, {route_feature_count} route features')
 
+def write_route_lines2(collector, exporter):
+    route_metadata = []
+    route_feature_count = 0
+    elevation = Elevation(os.environ['ELEVATION_DIRECTORY'])
+    try:
+        with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
+            for relation_id, route_relation in collector.relations.items():
+                node_roles = route_relation.get('node_roles', {})
+                start_nodes = node_roles.get('start', ())
+                finish_nodes = node_roles.get('end', ())
+                external_access_nodes = find_external_access_nodes(
+                    exporter.highway_way_ids_by_node,
+                    route_relation['way_ids'],
+                    {
+                        node_id
+                        for way_id in route_relation['way_ids']
+                        for node_id, _ in exporter.way_nodes.get(way_id, ())
+                    },
+                )
+                route_graph = RouteGraph2(
+                    route_relation,
+                    exporter.way_nodes,
+                    external_access_nodes,
+                    sampler=elevation,
+                )
+                if not route_graph.has_edges:
+                    continue
+
+                if len(start_nodes) == 1 and len(finish_nodes) == 1:
+                    traversal = route_graph.shortest_traversal(
+                        start_nodes[0],
+                        finish_nodes[0],
+                    )
+                elif len(start_nodes) == 1 and not finish_nodes:
+                    roundtrip = route_relation.get('roundtrip', False)
+                    traversal = (
+                        route_graph.shortest_traversal(start_nodes[0], start_nodes[0])
+                        if roundtrip
+                        else route_graph.shortest_traversal_to_nearest_finish(start_nodes[0])
+                    )
+                else:
+                    continue
+
+                if traversal is None:
+                    continue
+
+                path = [route_graph.point(node_id) for node_id in traversal]
+                write_feature(
+                    route_lines_file,
+                    {'type': 'LineString', 'coordinates': path},
+                    {
+                        'relation_id': relation_id,
+                        'name': route_relation['name'],
+                        'symbol': route_relation['symbol'],
+                        'network': route_relation['network'],
+                        'route_type': route_relation['type'],
+                    },
+                )
+                route_feature_count += 1
+    finally:
+        elevation.close()
+
+    with open('routes-meta.json', 'w') as metadata_file:
+        json.dump(route_metadata, metadata_file)
+    print(f'Route lines: {len(route_metadata)} routes, {route_feature_count} route features')
 
 def write_symbol_catalog(exporter):
     route_symbols = sorted(exporter.route_symbols)
