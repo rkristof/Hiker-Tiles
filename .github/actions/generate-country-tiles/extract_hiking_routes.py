@@ -817,6 +817,9 @@ def write_route_lines2(collector, exporter):
                     if route_graph.is_simple_line():
                         start_node, finish_node = route_graph.simple_line_endpoints()
                         traversal = route_graph.shortest_traversal(start_node, finish_node)
+                    elif route_graph.is_closed_loop():
+                        start_node = route_graph.closed_loop_start_node()
+                        traversal = route_graph.closed_loop_traversal(start_node)
                     else:
                         continue
 

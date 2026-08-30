@@ -118,6 +118,38 @@ class RouteGraph2:
         finish_node = next(node_id for node_id in endpoints if node_id != start_node)
         return start_node, finish_node
 
+    def is_closed_loop(self):
+        """Return whether the graph is one connected cycle."""
+        return bool(self._graph) and nx.is_connected(self._graph) and all(
+            degree == 2
+            for _, degree in self._graph.degree()
+        )
+
+    def closed_loop_start_node(self):
+        """Return a heuristic start node for a connected cycle."""
+        if not self.is_closed_loop():
+            return None
+        candidate_nodes = self._externally_reachable_nodes & set(self._graph)
+        return min(
+            candidate_nodes or self._graph,
+            key=self._relation_node_order.__getitem__,
+        )
+
+    def closed_loop_traversal(self, start_node):
+        """Return a closed traversal of every edge from the start node."""
+        if not self.is_closed_loop() or start_node not in self._graph:
+            return None
+        return [
+            start_node,
+            *(
+                second_node
+                for _, second_node in nx.eulerian_circuit(
+                    self._graph,
+                    source=start_node,
+                )
+            ),
+        ]
+
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
 
