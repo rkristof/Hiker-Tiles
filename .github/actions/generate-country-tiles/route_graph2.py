@@ -18,7 +18,7 @@ class RouteGraph2:
         self.eligible_nodes = set(eligible_nodes or ())
         self._roundtrip = roundtrip
         self._relation_node_order = {}
-        raw_graph = nx.MultiGraph()
+        self._raw_graph = nx.MultiGraph()
 
         for node_id in route_relation.get('node_ids', ()):
             self._relation_node_order.setdefault(
@@ -33,22 +33,22 @@ class RouteGraph2:
 
             for node_id, point in nodes:
                 self._relation_node_order.setdefault(node_id, len(self._relation_node_order))
-                raw_graph.add_node(node_id, point=point)
+                self._raw_graph.add_node(node_id, point=point)
 
             for first_node, second_node in zip(nodes, nodes[1:]):
                 first_node_id, first_point = first_node
                 second_node_id, second_point = second_node
                 if first_node_id == second_node_id:
                     continue
-                raw_graph.add_edge(
+                self._raw_graph.add_edge(
                     first_node_id,
                     second_node_id,
                     weight=self._haversine_distance_m(first_point, second_point),
                 )
 
-        self._repair_disconnected_components(raw_graph, sampler)
+        self._repair_disconnected_components(self._raw_graph, sampler)
 
-        self._graph = self._create_simple_graph(raw_graph, route_relation)
+        self._graph = self._create_simple_graph()
 
         if self._roundtrip and self._graph:
             self._graph = nx.eulerize(self._graph)
@@ -181,8 +181,20 @@ class RouteGraph2:
             for _, _, edge_data in self._graph.edges(data=True)
         )
 
+    def _create_simple_graph(self):
+        return RouteGraph2._create_compressed_graph(self._raw_graph, self._route_relation)
+
+    def _create_complex_graph(self):
+        """Create a compressed graph that also retains eligible route nodes."""
+        return RouteGraph2._create_compressed_graph(
+            self._raw_graph,
+            self._route_relation,
+            self.eligible_nodes,
+        )
+
     @staticmethod
-    def _create_simple_graph(raw_graph, route_relation):
+    def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
+        raw_graph = raw_graph.copy()
         retained_nodes = {
             node_id
             for node_id, degree in raw_graph.degree()
@@ -192,6 +204,11 @@ class RouteGraph2:
             node_id
             for role in ('start', 'end')
             for node_id in route_relation.get('node_roles', {}).get(role, ())
+            if node_id in raw_graph
+        )
+        retained_nodes.update(
+            node_id
+            for node_id in additional_nodes
             if node_id in raw_graph
         )
         if not retained_nodes and raw_graph:
