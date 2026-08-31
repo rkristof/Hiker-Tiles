@@ -11,12 +11,11 @@ class RouteGraph2:
         self,
         route_relation,
         way_nodes,
-        eligible_nodes=None,
         sampler=None,
         roundtrip=False,
     ):
         self._route_relation = route_relation
-        self.eligible_nodes = tuple(dict.fromkeys(eligible_nodes or ()))
+        self.eligible_nodes = ()
         self._roundtrip = roundtrip
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
@@ -56,6 +55,44 @@ class RouteGraph2:
     def has_edges(self):
         return self._graph.number_of_edges() > 0
 
+    @property
+    def component_count(self):
+        return nx.number_connected_components(self._graph)
+
+    def component_graphs(self):
+        """Return independent RouteGraph2 views for each connected component."""
+        components = sorted(
+            nx.connected_components(self._graph),
+            key=lambda component: min(component),
+        )
+        component_graphs = []
+        for component in components:
+            component = set(component)
+            component_relation = {
+                **self._route_relation,
+                'node_roles': {
+                    role: [node_id for node_id in node_ids if node_id in component]
+                    for role, node_ids in self._route_relation.get('node_roles', {}).items()
+                },
+            }
+            component_graph = object.__new__(RouteGraph2)
+            component_graph._route_relation = component_relation
+            component_graph._roundtrip = self._roundtrip
+            component_graph._relation_node_order = {
+                node_id: order
+                for node_id, order in self._relation_node_order.items()
+                if node_id in component
+            }
+            raw_component = nx.node_connected_component(
+                self._raw_graph,
+                next(iter(component)),
+            )
+            component_graph._raw_graph = self._raw_graph.subgraph(raw_component).copy()
+            component_graph._graph = self._graph.subgraph(component).copy()
+            component_graph._complex_graph = None
+            component_graphs.append(component_graph)
+        return component_graphs
+
     def is_simple_line(self):
         """Return whether the graph is one connected line without branches."""
         if not self._graph or not nx.is_connected(self._graph):
@@ -87,21 +124,11 @@ class RouteGraph2:
         """Return whether the graph supports a closed Eulerian traversal."""
         return bool(self._graph) and nx.is_eulerian(self._graph)
 
-    def closed_loop_start_node(self):
-        """Return a heuristic start node for an Eulerian graph."""
-        if not self.is_eulerian():
-            return None
-        candidate_nodes = set(self.eligible_nodes) & set(self._graph)
-        return min(
-            candidate_nodes or self._graph,
-            key=self._relation_node_order.__getitem__,
-        )
-
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
 
     def complex_eulerian_traversal(self):
-        """Return an Eulerian traversal from the first eligible graph node."""
+        """Return an Eulerian traversal from an eligible or ordered graph node."""
         graph = self._complex_graph
         if not graph or not nx.is_connected(graph) or not nx.is_eulerian(graph):
             return None
@@ -111,7 +138,7 @@ class RouteGraph2:
             None,
         )
         if start_node is None:
-            return None
+            start_node = min(graph, key=self._relation_node_order.__getitem__)
 
         return [
             start_node,
@@ -125,13 +152,15 @@ class RouteGraph2:
         ]
 
     def eulerian_traversal(self, start_node):
-        """Return a closed traversal covering every graph edge."""
+        """Return a closed Eulerian or shortest complete traversal."""
         if (
             start_node not in self._graph
             or not self._graph
             or not nx.is_connected(self._graph)
         ):
             return None
+        if not nx.is_eulerian(self._graph):
+            return self.shortest_complete_traversal_simple(start_node, start_node)
 
         return [
             start_node,
@@ -143,19 +172,6 @@ class RouteGraph2:
                 )
             ),
         ]
-
-    def shortest_eulerian_cycle_length(self):
-        """Return the weighted length of the shortest Eulerian cycle."""
-        if not self._graph or not nx.is_connected(self._graph) or not nx.is_eulerian(self._graph):
-            return None
-
-        return sum(
-            self._graph[first_node][second_node][edge_key]['weight']
-            for first_node, second_node, edge_key in nx.eulerian_circuit(
-                self._graph,
-                keys=True,
-            )
-        )
 
     def traversal_distance_simple(self, traversal):
         """Return the weighted length of a traversal in the simple graph."""
@@ -325,7 +341,7 @@ class RouteGraph2:
     def raw_route_distance_m(self):
         return sum(
             edge_data['weight']
-            for _, _, edge_data in self._graph.edges(data=True)
+            for _, _, edge_data in self._raw_graph.edges(data=True)
         )
 
     def _create_simple_graph(self):
@@ -333,11 +349,18 @@ class RouteGraph2:
             self._raw_graph,
             self._route_relation,
         )
-        if self._roundtrip and self._graph:
+        if self._roundtrip and self._graph and nx.is_connected(self._graph):
             self._graph = nx.eulerize(self._graph)
 
-    def _create_complex_graph(self):
+    def _create_complex_graph(self, eligible_nodes):
         """Create a compressed graph that also retains eligible route nodes."""
+        self.eligible_nodes = tuple(
+            dict.fromkeys(
+                node_id
+                for node_id in eligible_nodes
+                if node_id in self._raw_graph
+            )
+        )
         self._complex_graph = RouteGraph2._create_compressed_graph(
             self._raw_graph,
             self._route_relation,

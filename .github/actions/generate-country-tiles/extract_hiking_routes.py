@@ -66,6 +66,7 @@ SYMBOL_MINZOOM = {
     'rwn': 11,
     'lwn': 13,
 }
+MAX_TRAVERSAL_DISTANCE_M = 40_000
 
 
 def write_feature(output, geometry, properties, minzoom=None):
@@ -774,6 +775,80 @@ def write_route_lines(collector, exporter):
     print(f'Route lines: {len(route_metadata)} routes, {route_feature_count} route features')
 
 def write_route_lines2(collector, exporter):
+    def component_traversal(route_graph, start_nodes, finish_nodes, eligible_node_finder):
+        traversal = None
+        traversal_graph = route_graph._graph
+        if len(start_nodes) == 1 and len(finish_nodes) == 1:
+            start_node = start_nodes[0]
+            finish_node = finish_nodes[0]
+            if start_node == finish_node:
+                traversal = route_graph.eulerian_traversal(start_node)
+            else:
+                traversal = route_graph.shortest_complete_traversal_simple(
+                    start_node,
+                    finish_node,
+                )
+        elif len(start_nodes) == 1 and not finish_nodes:
+            traversal = (
+                route_graph.eulerian_traversal(start_nodes[0])
+                if route_graph._roundtrip
+                else route_graph.shortest_complete_traversal_to_nearest_finish(start_nodes[0])
+            )
+        elif route_graph.is_simple_line():
+            start_node, finish_node = route_graph.simple_line_endpoints()
+            traversal = route_graph.shortest_complete_traversal_simple(start_node, finish_node)
+        else:
+            start_candidates = eligible_node_finder.rank_eligible_nodes()
+            if route_graph.is_eulerian():
+                route_graph._create_complex_graph(start_candidates)
+                traversal = route_graph.complex_eulerian_traversal()
+                traversal_graph = route_graph._complex_graph
+            else:
+                finish_candidates = eligible_node_finder.rank_eligible_nodes(is_start=False)[:10]
+                route_graph._create_complex_graph((*start_candidates, *finish_candidates))
+                shortest_simple_traversal = route_graph.shortest_complete_traversal_simple()
+                if shortest_simple_traversal is None:
+                    return None, traversal_graph
+
+                simple_distance = route_graph.traversal_distance_simple(shortest_simple_traversal)
+                candidate_distance_limit = simple_distance * 1.1
+                shortest_candidate = None
+                shortest_candidate_distance = float('inf')
+                finish_candidates = [
+                    node_id
+                    for node_id in finish_candidates
+                    if node_id in route_graph._complex_graph
+                ]
+                for start_node in route_graph.eligible_nodes:
+                    for finish_node in finish_candidates:
+                        if finish_node == start_node:
+                            continue
+                        candidate_traversal = route_graph.shortest_complete_traversal_complex(
+                            start_node,
+                            finish_node,
+                        )
+                        if candidate_traversal is None:
+                            continue
+                        candidate_distance = route_graph.traversal_distance_complex(
+                            candidate_traversal,
+                        )
+                        if candidate_distance < shortest_candidate_distance:
+                            shortest_candidate = candidate_traversal
+                            shortest_candidate_distance = candidate_distance
+                        if candidate_distance <= candidate_distance_limit:
+                            traversal = candidate_traversal
+                            traversal_graph = route_graph._complex_graph
+                            break
+                    if traversal is not None:
+                        break
+
+                if traversal is None:
+                    traversal = shortest_candidate or shortest_simple_traversal
+                    if shortest_candidate is not None:
+                        traversal_graph = route_graph._complex_graph
+
+        return traversal, traversal_graph
+
     route_metadata = []
     route_feature_count = 0
     elevation = Elevation(os.environ['ELEVATION_DIRECTORY'])
@@ -795,92 +870,56 @@ def write_route_lines2(collector, exporter):
                     },
                     exporter.landmarks,
                 )
-                eligible_nodes = eligible_node_finder.rank_eligible_nodes()
                 route_graph = RouteGraph2(
                     route_relation,
                     exporter.way_nodes,
-                    eligible_nodes,
                     sampler=elevation,
                     roundtrip=roundtrip,
                 )
                 if not route_graph.has_edges:
                     continue
 
-                traversal = None
-                traversal_graph = route_graph._graph
-                if len(start_nodes) == 1 and len(finish_nodes) == 1:
-                    start_node = start_nodes[0]
-                    finish_node = finish_nodes[0]
-                    traversal = (
-                        route_graph.eulerian_traversal(start_node)
-                        if start_node == finish_node
-                        else route_graph.shortest_complete_traversal_simple(start_node, finish_node)
-                    )
-                elif len(start_nodes) == 1 and not finish_nodes:
-                    traversal = (
-                        route_graph.eulerian_traversal(start_nodes[0])
-                        if roundtrip
-                        else route_graph.shortest_complete_traversal_to_nearest_finish(start_nodes[0])
-                    )
-                elif route_graph.is_simple_line():
-                    start_node, finish_node = route_graph.simple_line_endpoints()
-                    traversal = route_graph.shortest_complete_traversal_simple(start_node, finish_node)
-                else:
-                    route_graph._create_complex_graph()
-                    if route_graph.is_eulerian():
-                        traversal = route_graph.complex_eulerian_traversal()
-                        traversal_graph = route_graph._complex_graph
-                    else:
-                        simple_graph = route_graph._graph
-                        shortest_simple_traversal = route_graph.shortest_complete_traversal_simple()
-                        if shortest_simple_traversal is None:
-                            continue
-
-                        simple_distance = route_graph.traversal_distance_simple(shortest_simple_traversal)
-                        candidate_distance_limit = simple_distance * 1.1
-                        shortest_candidate = None
-                        shortest_candidate_distance = float('inf')
-                        finish_candidates = eligible_node_finder.rank_eligible_nodes(is_start=False)
-                        for start_node in eligible_nodes:
-                            for finish_node in finish_candidates:
-                                if finish_node == start_node:
-                                    continue
-                                candidate_traversal = route_graph.shortest_complete_traversal_complex(
-                                    start_node,
-                                    finish_node,
-                                )
-                                if candidate_traversal is None:
-                                    continue
-                                candidate_distance = route_graph.traversal_distance_complex(
-                                    candidate_traversal,
-                                )
-                                if candidate_distance < shortest_candidate_distance:
-                                    shortest_candidate = candidate_traversal
-                                    shortest_candidate_distance = candidate_distance
-                                if candidate_distance <= candidate_distance_limit:
-                                    traversal = candidate_traversal
-                                    traversal_graph = route_graph._complex_graph
-                                    break
-                            if traversal is not None:
-                                break
-
+                if route_graph.raw_route_distance_m() < MAX_TRAVERSAL_DISTANCE_M:
+                    component_results = []
+                    for component_graph in route_graph.component_graphs():
+                        component_start_nodes = [
+                            node_id for node_id in start_nodes if node_id in component_graph._graph
+                        ]
+                        component_finish_nodes = [
+                            node_id for node_id in finish_nodes if node_id in component_graph._graph
+                        ]
+                        traversal, traversal_graph = component_traversal(
+                            component_graph,
+                            component_start_nodes,
+                            component_finish_nodes,
+                            eligible_node_finder,
+                        )
                         if traversal is None:
-                            traversal = shortest_candidate or shortest_simple_traversal
-                            if shortest_candidate is None:
-                                traversal_graph = simple_graph
-                            else:
-                                traversal_graph = route_graph._complex_graph
+                            component_results = []
+                            break
+                        component_results.append([
+                            traversal_graph.nodes[node_id]['point']
+                            for node_id in traversal
+                        ])
 
-                if traversal is None:
+                    lines = component_results
+                else:
+                    lines = [
+                        [point for _, point in exporter.way_nodes.get(way_id, ())]
+                        for way_id in route_relation['way_ids']
+                    ]
+
+                lines = [line for line in lines if len(line) >= 2]
+
+                if not lines:
                     continue
 
-                path = [
-                    traversal_graph.nodes[node_id]['point']
-                    for node_id in traversal
-                ]
                 write_feature(
                     route_lines_file,
-                    {'type': 'LineString', 'coordinates': path},
+                    {
+                        'type': 'LineString' if len(lines) == 1 else 'MultiLineString',
+                        'coordinates': lines[0] if len(lines) == 1 else lines,
+                    },
                     {
                         'relation_id': relation_id,
                         'name': route_relation['name'],
@@ -911,7 +950,7 @@ def main():
     print(f'Route member ways collected: {len(collector.way_routes)}')
 
     exporter = export_route_features(collector)
-    write_route_lines(collector, exporter)
+    write_route_lines2(collector, exporter)
     write_symbol_catalog(exporter)
 
 
