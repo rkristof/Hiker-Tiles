@@ -144,12 +144,16 @@ class RouteGraph:
             return []
 
         coordinates = [graph.nodes[traversal[0]]['point']]
+        used_edges = {}
         for first_node, second_node in zip(traversal, traversal[1:]):
             edge_data = graph.get_edge_data(first_node, second_node)
             if edge_data is None:
                 return []
             if graph.is_multigraph():
-                edge_data = next(iter(edge_data.values()))
+                edge_keys = tuple(edge_data)
+                edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
+                edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
+                used_edges[frozenset((first_node, second_node))] = edge_index + 1
             points = edge_data['points']
             if points[0] != graph.nodes[first_node]['point']:
                 points = list(reversed(points))
@@ -213,13 +217,15 @@ class RouteGraph:
     @staticmethod
     def _traversal_distance(traversal, graph):
         distance = 0
+        used_edges = {}
         for first_node, second_node in zip(traversal, traversal[1:]):
             edge_data = graph.get_edge_data(first_node, second_node)
             if graph.is_multigraph():
-                distance += min(
-                    data['weight']
-                    for data in edge_data.values()
-                )
+                edge_keys = tuple(edge_data)
+                edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
+                edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
+                used_edges[frozenset((first_node, second_node))] = edge_index + 1
+                distance += edge_data['weight']
             else:
                 distance += edge_data['weight']
         return distance
@@ -316,7 +322,7 @@ class RouteGraph:
                     euler_graph.add_edge(
                         path_first,
                         path_second,
-                        **graph[path_first][path_second],
+                        **self._minimum_edge_data(graph, path_first, path_second),
                     )
 
             traversal = [start_node]
@@ -362,7 +368,7 @@ class RouteGraph:
                     )
                 )
             ),
-            key=lambda traversal: nx.path_weight(self._graph, traversal, weight='weight'),
+            key=self.traversal_distance_simple,
             default=None,
         )
 
@@ -420,7 +426,7 @@ class RouteGraph:
         if not retained_nodes and raw_graph:
             retained_nodes.add(next(iter(raw_graph)))
 
-        simple_graph = nx.Graph()
+        simple_graph = nx.MultiGraph()
         simple_graph.add_nodes_from(
             (node_id, raw_graph.nodes[node_id])
             for node_id in retained_nodes
@@ -449,15 +455,12 @@ class RouteGraph:
                     edge_points.extend(next_points[1:])
                     current_node = next_node
 
-                if simple_graph.has_edge(start_node, current_node):
-                    simple_graph[start_node][current_node]['weight'] += edge_weight
-                else:
-                    simple_graph.add_edge(
-                        start_node,
-                        current_node,
-                        weight=edge_weight,
-                        points=edge_points,
-                    )
+                simple_graph.add_edge(
+                    start_node,
+                    current_node,
+                    weight=edge_weight,
+                    points=edge_points,
+                )
 
         return simple_graph
 
@@ -465,10 +468,19 @@ class RouteGraph:
     def _eulerize_graph(graph):
         eulerized_graph = nx.eulerize(graph)
         for first_node, second_node, edge_key in eulerized_graph.edges(keys=True):
-            eulerized_graph[first_node][second_node][edge_key].update(
-                graph[first_node][second_node],
-            )
+            edge_data = eulerized_graph[first_node][second_node][edge_key]
+            if 'weight' not in edge_data:
+                edge_data.update(
+                    RouteGraph._minimum_edge_data(graph, first_node, second_node),
+                )
         return eulerized_graph
+
+    @staticmethod
+    def _minimum_edge_data(graph, first_node, second_node):
+        edge_data = graph.get_edge_data(first_node, second_node)
+        if graph.is_multigraph():
+            return min(edge_data.values(), key=lambda data: data['weight'])
+        return edge_data
 
     def _repair_disconnected_components(self, sampler):
         components = list(nx.connected_components(self._raw_graph))
