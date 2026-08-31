@@ -1,6 +1,8 @@
 import math
 import re
 
+from utils import haversine_distance_m
+
 
 LANDMARK_RULES = (
     ('highway', 'trailhead'),
@@ -33,10 +35,10 @@ class LandmarkIndex:
     def __init__(self, landmarks):
         self._landmarks = tuple(landmarks)
         self._cells = {}
-        for landmark_index, landmark in enumerate(self._landmarks):
+        for landmark in self._landmarks:
             for point in landmark.get('points', ()):
                 cell = self._cell(point)
-                self._cells.setdefault(cell, []).append((landmark_index, point))
+            self._cells.setdefault(cell, []).append((landmark, point))
 
     def nearby(self, point):
         """Yield indexed landmark points within the maximum distance window."""
@@ -55,10 +57,6 @@ class LandmarkIndex:
             for longitude_index in longitude_range:
                 yield from self._cells.get((latitude_index, longitude_index), ())
 
-    def landmark(self, landmark_index):
-        """Return the landmark stored at an index position."""
-        return self._landmarks[landmark_index]
-
     @staticmethod
     def _cell(point):
         return (
@@ -70,7 +68,6 @@ class LandmarkIndex:
 class EligibleNodeFinder:
     """Find and rank externally accessible route nodes."""
 
-    LANDMARK_MAX_DISTANCE_M = 30
     MAX_RANKED_NODES = 10
 
     def __init__(
@@ -144,8 +141,7 @@ class EligibleNodeFinder:
                 if candidate_node_id == node_id
             ]
             for point in node_points:
-                for landmark_index_value, landmark_point in landmark_index.nearby(point):
-                    landmark = landmark_index.landmark(landmark_index_value)
+                for landmark, landmark_point in landmark_index.nearby(point):
                     if self._matches_landmark(point, landmark_point, route_tokens, landmark):
                         landmark_nodes.add(node_id)
                         break
@@ -154,7 +150,7 @@ class EligibleNodeFinder:
         return landmark_nodes
 
     def _matches_landmark(self, route_point, landmark_point, route_tokens, landmark):
-        if self._haversine_distance_m(route_point, landmark_point) > self.LANDMARK_MAX_DISTANCE_M:
+        if haversine_distance_m(route_point, landmark_point) > LANDMARK_MAX_DISTANCE_M:
             return False
         landmark_tokens = set(
             self._text_token_list(
@@ -177,18 +173,3 @@ class EligibleNodeFinder:
             for token in re.findall(r'\w+', value, flags=re.UNICODE)
             if len(token) >= 3
         ]
-
-    @staticmethod
-    def _haversine_distance_m(first_point, second_point):
-        earth_radius_m = 6371000
-        first_latitude = math.radians(first_point[1])
-        second_latitude = math.radians(second_point[1])
-        delta_latitude = second_latitude - first_latitude
-        delta_longitude = math.radians(second_point[0] - first_point[0])
-        haversine_term = (
-            math.sin(delta_latitude / 2) ** 2
-            + math.cos(first_latitude)
-            * math.cos(second_latitude)
-            * math.sin(delta_longitude / 2) ** 2
-        )
-        return earth_radius_m * 2 * math.asin(math.sqrt(haversine_term))

@@ -708,15 +708,16 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual((traversal[0], traversal[-1]), (0, 12))
 
     def test_landmark_index_returns_only_nearby_points(self):
-        index = LandmarkIndex([
+        landmarks = [
             {'points': [[0.0000, 0.0000]]},
             {'points': [[0.0100, 0.0000]]},
-        ])
+        ]
+        index = LandmarkIndex(landmarks)
 
         nearby = list(index.nearby([0.0001, 0.0000]))
 
         self.assertEqual(len(nearby), 1)
-        self.assertEqual(nearby[0][0], 0)
+        self.assertIs(nearby[0][0], landmarks[0])
 
     def test_landmark_distance_limit_is_enforced(self):
         relation = {
