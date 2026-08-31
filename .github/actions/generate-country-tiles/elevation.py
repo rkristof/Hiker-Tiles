@@ -3,7 +3,7 @@ import os
 
 import rasterio
 
-from route_graph import haversine_distance_m
+from utils import haversine_distance_m
 
 
 def offset_elevation_profile(profile, distance_m):
