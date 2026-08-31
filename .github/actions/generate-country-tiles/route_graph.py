@@ -49,7 +49,12 @@ class RouteGraph:
 
         self._repair_disconnected_components(sampler)
 
-        if not self._roundtrip and nx.is_eulerian(self._raw_graph):
+        if (
+            not self._roundtrip
+            and self._raw_graph
+            and self._raw_graph.number_of_edges() > 0
+            and nx.is_eulerian(self._raw_graph)
+        ):
             self._roundtrip = True
 
         self._create_simple_graph()
