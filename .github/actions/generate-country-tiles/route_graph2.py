@@ -1,3 +1,4 @@
+import heapq
 import math
 
 import networkx as nx
@@ -156,19 +157,69 @@ class RouteGraph2:
             )
         )
 
-    def shortest_traversal(self, start_node, finish_node):
-        """Return a shortest path between two graph nodes."""
-        if start_node not in self._graph or finish_node not in self._graph:
+    def shortest_complete_traversal(self, start_node, finish_node):
+        """Return the shortest walk visiting every graph node."""
+        if (
+            start_node not in self._graph
+            or finish_node not in self._graph
+            or not self._graph
+            or not nx.is_connected(self._graph)
+        ):
             return None
-        try:
-            return nx.shortest_path(
-                self._graph,
-                start_node,
-                finish_node,
-                weight='weight',
-            )
-        except nx.NetworkXNoPath:
-            return None
+
+        node_ids = tuple(self._graph)
+        node_indices = {
+            node_id: node_index
+            for node_index, node_id in enumerate(node_ids)
+        }
+        adjacency = [
+            [
+                (node_indices[neighbor], edge_data['weight'])
+                for _, neighbor, edge_data in self._graph.edges(
+                    node_id,
+                    data=True,
+                )
+            ]
+            for node_id in node_ids
+        ]
+        start_index = node_indices[start_node]
+        finish_index = node_indices[finish_node]
+        start_mask = 1 << start_index
+        complete_mask = (1 << len(node_ids)) - 1
+        start_state = (start_index, start_mask)
+        distances = {start_state: 0}
+        predecessors = {}
+        queue = [(0, start_index, start_mask)]
+
+        while queue:
+            distance, current_index, visited_mask = heapq.heappop(queue)
+            state = (current_index, visited_mask)
+            if distance != distances.get(state):
+                continue
+            if current_index == finish_index and visited_mask == complete_mask:
+                traversal = [node_ids[current_index]]
+                while state != start_state:
+                    state = predecessors[state]
+                    traversal.append(node_ids[state[0]])
+                traversal.reverse()
+                return traversal
+
+            for next_index, edge_weight in adjacency[current_index]:
+                next_state = (
+                    next_index,
+                    visited_mask | (1 << next_index),
+                )
+                next_distance = distance + edge_weight
+                if next_distance >= distances.get(next_state, math.inf):
+                    continue
+                distances[next_state] = next_distance
+                predecessors[next_state] = state
+                heapq.heappush(
+                    queue,
+                    (next_distance, next_index, next_state[1]),
+                )
+
+        return None
 
     def shortest_traversal_to_nearest_finish(self, start_node):
         """Return the shortest traversal to a possible finish node."""
@@ -191,7 +242,12 @@ class RouteGraph2:
             (
                 traversal
                 for finish_node in finish_nodes
-                if (traversal := self.shortest_traversal(start_node, finish_node))
+                if (
+                    traversal := self.shortest_complete_traversal(
+                        start_node,
+                        finish_node,
+                    )
+                )
             ),
             key=lambda traversal: nx.path_weight(self._graph, traversal, weight='weight'),
             default=None,

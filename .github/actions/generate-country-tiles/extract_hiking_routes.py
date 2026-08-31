@@ -814,17 +814,17 @@ def write_route_lines2(collector, exporter):
                     traversal = (
                         route_graph.eulerian_traversal(start_node)
                         if start_node == finish_node
-                        else route_graph.shortest_traversal(start_node, finish_node)
+                        else route_graph.shortest_complete_traversal(start_node, finish_node)
                     )
                 elif len(start_nodes) == 1 and not finish_nodes:
                     traversal = (
                         route_graph.eulerian_traversal(start_nodes[0])
                         if roundtrip
-                        else route_graph.shortest_traversal_to_nearest_finish(start_nodes[0])
+                        else route_graph.shortest_complete_traversal_to_nearest_finish(start_nodes[0])
                     )
                 elif route_graph.is_simple_line():
                     start_node, finish_node = route_graph.simple_line_endpoints()
-                    traversal = route_graph.shortest_traversal(start_node, finish_node)
+                    traversal = route_graph.shortest_complete_traversal(start_node, finish_node)
                 else:
                     route_graph._create_complex_graph()
                     if route_graph.is_eulerian():
