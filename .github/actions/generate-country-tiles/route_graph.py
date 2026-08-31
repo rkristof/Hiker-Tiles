@@ -1,6 +1,3 @@
-import heapq
-import math
-
 import networkx as nx
 
 from utils import haversine_distance_m
@@ -51,6 +48,9 @@ class RouteGraph:
                 )
 
         self._repair_disconnected_components(sampler)
+
+        if not self._roundtrip and nx.is_eulerian(self._raw_graph):
+            self._roundtrip = True
 
         self._create_simple_graph()
 
@@ -251,7 +251,7 @@ class RouteGraph:
         )
 
     def _shortest_complete_traversal(self, start_node, finish_node, graph):
-        """Return the shortest walk visiting every graph node."""
+        """Return a shortest weighted walk covering every graph edge."""
         if (
             start_node not in graph
             or (
@@ -263,72 +263,71 @@ class RouteGraph:
         ):
             return None
 
-        node_ids = tuple(graph)
-        node_indices = {
-            node_id: node_index
-            for node_index, node_id in enumerate(node_ids)
-        }
-        adjacency = [
-            [
-                (node_indices[neighbor], edge_data['weight'])
-                for _, neighbor, edge_data in graph.edges(
-                    node_id,
-                    data=True,
-                )
-            ]
-            for node_id in node_ids
-        ]
-        start_index = node_indices[start_node]
-        finish_index = (
-            node_indices[finish_node]
+        finish_nodes = (
+            [finish_node]
             if finish_node is not None
-            else None
-        )
-        start_mask = 1 << start_index
-        complete_mask = (1 << len(node_ids)) - 1
-        start_state = (start_index, start_mask)
-        distances = {start_state: 0}
-        predecessors = {}
-        queue = [(0, start_index, start_mask)]
+            else [node_id for node_id in graph if node_id != start_node]
+        ) or [start_node]
+        shortest_traversal = None
+        shortest_distance = float('inf')
 
-        while queue:
-            distance, current_index, visited_mask = heapq.heappop(queue)
-            state = (current_index, visited_mask)
-            if distance != distances.get(state):
-                continue
-            if (
-                visited_mask == complete_mask
-                and (
-                    (
-                        finish_index is None
-                        and current_index != start_index
+        for candidate_finish in finish_nodes:
+            odd_nodes = [
+                node_id
+                for node_id, degree in graph.degree()
+                if degree % 2
+            ]
+            for endpoint in (start_node, candidate_finish):
+                if endpoint in odd_nodes:
+                    odd_nodes.remove(endpoint)
+                else:
+                    odd_nodes.append(endpoint)
+
+            matching_graph = nx.Graph()
+            shortest_paths = {}
+            for first_index, first_node in enumerate(odd_nodes):
+                distances, paths = nx.single_source_dijkstra(
+                    graph,
+                    first_node,
+                    weight='weight',
+                )
+                for second_node in odd_nodes[first_index + 1:]:
+                    matching_graph.add_edge(
+                        first_node,
+                        second_node,
+                        weight=distances[second_node],
                     )
-                    or current_index == finish_index
-                )
+                    shortest_paths[first_node, second_node] = paths[second_node]
+
+            euler_graph = nx.MultiGraph(graph)
+            for first_node, second_node in nx.min_weight_matching(
+                matching_graph,
+                weight='weight',
             ):
-                traversal = [node_ids[current_index]]
-                while state != start_state:
-                    state = predecessors[state]
-                    traversal.append(node_ids[state[0]])
-                traversal.reverse()
-                return traversal
+                path = shortest_paths.get((first_node, second_node))
+                if path is None:
+                    path = reversed(shortest_paths[second_node, first_node])
+                for path_first, path_second in nx.utils.pairwise(path):
+                    euler_graph.add_edge(
+                        path_first,
+                        path_second,
+                        **graph[path_first][path_second],
+                    )
 
-            for next_index, edge_weight in adjacency[current_index]:
-                next_state = (
-                    next_index,
-                    visited_mask | (1 << next_index),
+            traversal = [start_node]
+            traversal.extend(
+                second_node
+                for _, second_node in nx.eulerian_path(
+                    euler_graph,
+                    source=start_node,
                 )
-                next_distance = distance + edge_weight
-                if next_distance >= distances.get(next_state, math.inf):
-                    continue
-                distances[next_state] = next_distance
-                predecessors[next_state] = state
-                heapq.heappush(
-                    queue,
-                    (next_distance, next_index, next_state[1]),
-                )
+            )
+            distance = self._traversal_distance(traversal, graph)
+            if distance < shortest_distance:
+                shortest_traversal = traversal
+                shortest_distance = distance
 
-        return None
+        return shortest_traversal
 
     def shortest_complete_traversal_to_nearest_finish(self, start_node):
         """Return the shortest traversal to a possible finish node."""
@@ -395,7 +394,8 @@ class RouteGraph:
 
     @staticmethod
     def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
-        raw_graph = raw_graph.copy()
+        # Compress topological edges; raw graph retains duplicate route members.
+        raw_graph = nx.MultiGraph(nx.Graph(raw_graph))
         retained_nodes = {
             node_id
             for node_id, degree in raw_graph.degree()
