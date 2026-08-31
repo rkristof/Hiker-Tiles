@@ -637,12 +637,6 @@ def write_route_lines(collector, exporter):
             else:
                 finish_candidates = eligible_node_finder.rank_eligible_nodes(is_start=False)[:10]
                 route_graph._create_complex_graph((*start_candidates, *finish_candidates))
-                shortest_simple_traversal = route_graph.shortest_complete_traversal_simple()
-                if shortest_simple_traversal is None:
-                    return None, traversal_graph
-
-                simple_distance = route_graph.traversal_distance_simple(shortest_simple_traversal)
-                candidate_distance_limit = simple_distance * 1.1
                 shortest_candidate = None
                 shortest_candidate_distance = float('inf')
                 finish_candidates = [
@@ -666,17 +660,9 @@ def write_route_lines(collector, exporter):
                         if candidate_distance < shortest_candidate_distance:
                             shortest_candidate = candidate_traversal
                             shortest_candidate_distance = candidate_distance
-                        if candidate_distance <= candidate_distance_limit:
-                            traversal = candidate_traversal
-                            traversal_graph = route_graph._complex_graph
-                            break
-                    if traversal is not None:
-                        break
-
-                if traversal is None:
-                    traversal = shortest_candidate or shortest_simple_traversal
-                    if shortest_candidate is not None:
-                        traversal_graph = route_graph._complex_graph
+                traversal = shortest_candidate
+                if traversal is not None:
+                    traversal_graph = route_graph._complex_graph
 
         return traversal, traversal_graph
 
