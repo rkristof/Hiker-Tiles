@@ -71,7 +71,7 @@ class EligibleNodeFinder:
     """Find and rank externally accessible route nodes."""
 
     LANDMARK_MAX_DISTANCE_M = 30
-    MAX_RANKED_NODES = 50
+    MAX_RANKED_NODES = 20
 
     def __init__(
         self,

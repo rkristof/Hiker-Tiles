@@ -157,17 +157,73 @@ class RouteGraph2:
             )
         )
 
-    def shortest_complete_traversal(self, start_node, finish_node):
+    def traversal_distance_simple(self, traversal):
+        """Return the weighted length of a traversal in the simple graph."""
+        return self._traversal_distance(traversal, self._graph)
+
+    def traversal_distance_complex(self, traversal):
+        """Return the weighted length of a traversal in the complex graph."""
+        return self._traversal_distance(traversal, self._complex_graph)
+
+    @staticmethod
+    def _traversal_distance(traversal, graph):
+        distance = 0
+        for first_node, second_node in zip(traversal, traversal[1:]):
+            edge_data = graph.get_edge_data(first_node, second_node)
+            if graph.is_multigraph():
+                distance += min(
+                    data['weight']
+                    for data in edge_data.values()
+                )
+            else:
+                distance += edge_data['weight']
+        return distance
+
+    def shortest_complete_traversal_simple(self, start_node=None, finish_node=None):
+        """Return the shortest complete traversal in the simple graph."""
+        if start_node is None and finish_node is None:
+            return min(
+                (
+                    self._shortest_complete_traversal(
+                        start_node,
+                        None,
+                        self._graph,
+                    )
+                    for start_node in self._graph
+                ),
+                key=self.traversal_distance_simple,
+                default=None,
+            )
+        if start_node is None or finish_node is None:
+            return None
+        return self._shortest_complete_traversal(
+            start_node,
+            finish_node,
+            self._graph,
+        )
+
+    def shortest_complete_traversal_complex(self, start_node, finish_node):
+        """Return the shortest complete traversal in the complex graph."""
+        return self._shortest_complete_traversal(
+            start_node,
+            finish_node,
+            self._complex_graph,
+        )
+
+    def _shortest_complete_traversal(self, start_node, finish_node, graph):
         """Return the shortest walk visiting every graph node."""
         if (
-            start_node not in self._graph
-            or finish_node not in self._graph
-            or not self._graph
-            or not nx.is_connected(self._graph)
+            start_node not in graph
+            or (
+                finish_node is not None
+                and finish_node not in graph
+            )
+            or not graph
+            or not nx.is_connected(graph)
         ):
             return None
 
-        node_ids = tuple(self._graph)
+        node_ids = tuple(graph)
         node_indices = {
             node_id: node_index
             for node_index, node_id in enumerate(node_ids)
@@ -175,7 +231,7 @@ class RouteGraph2:
         adjacency = [
             [
                 (node_indices[neighbor], edge_data['weight'])
-                for _, neighbor, edge_data in self._graph.edges(
+                for _, neighbor, edge_data in graph.edges(
                     node_id,
                     data=True,
                 )
@@ -183,7 +239,11 @@ class RouteGraph2:
             for node_id in node_ids
         ]
         start_index = node_indices[start_node]
-        finish_index = node_indices[finish_node]
+        finish_index = (
+            node_indices[finish_node]
+            if finish_node is not None
+            else None
+        )
         start_mask = 1 << start_index
         complete_mask = (1 << len(node_ids)) - 1
         start_state = (start_index, start_mask)
@@ -196,7 +256,16 @@ class RouteGraph2:
             state = (current_index, visited_mask)
             if distance != distances.get(state):
                 continue
-            if current_index == finish_index and visited_mask == complete_mask:
+            if (
+                visited_mask == complete_mask
+                and (
+                    (
+                        finish_index is None
+                        and current_index != start_index
+                    )
+                    or current_index == finish_index
+                )
+            ):
                 traversal = [node_ids[current_index]]
                 while state != start_state:
                     state = predecessors[state]
@@ -221,7 +290,7 @@ class RouteGraph2:
 
         return None
 
-    def shortest_traversal_to_nearest_finish(self, start_node):
+    def shortest_complete_traversal_to_nearest_finish(self, start_node):
         """Return the shortest traversal to a possible finish node."""
         if (
             start_node not in self._graph
@@ -243,7 +312,7 @@ class RouteGraph2:
                 traversal
                 for finish_node in finish_nodes
                 if (
-                    traversal := self.shortest_complete_traversal(
+                    traversal := self.shortest_complete_traversal_simple(
                         start_node,
                         finish_node,
                     )
