@@ -45,6 +45,7 @@ class RouteGraph2:
                     first_node_id,
                     second_node_id,
                     weight=self._haversine_distance_m(first_point, second_point),
+                    points=[first_point, second_point],
                 )
 
         self._repair_disconnected_components(sampler)
@@ -126,6 +127,27 @@ class RouteGraph2:
 
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
+
+    def traversal_coordinates(self, traversal, graph=None):
+        """Return full route coordinates for a compressed node traversal."""
+        if not traversal:
+            return []
+        graph = self._graph if graph is None else graph
+        if traversal[0] not in graph:
+            return []
+
+        coordinates = [graph.nodes[traversal[0]]['point']]
+        for first_node, second_node in zip(traversal, traversal[1:]):
+            edge_data = graph.get_edge_data(first_node, second_node)
+            if edge_data is None:
+                return []
+            if graph.is_multigraph():
+                edge_data = next(iter(edge_data.values()))
+            points = edge_data['points']
+            if points[0] != graph.nodes[first_node]['point']:
+                points = list(reversed(points))
+            coordinates.extend(points[1:])
+        return coordinates
 
     def complex_eulerian_traversal(self):
         """Return an Eulerian traversal from an eligible or ordered graph node."""
@@ -350,7 +372,7 @@ class RouteGraph2:
             self._route_relation,
         )
         if self._roundtrip and self._graph and nx.is_connected(self._graph):
-            self._graph = nx.eulerize(self._graph)
+            self._graph = self._eulerize_graph(self._graph)
 
     def _create_complex_graph(self, eligible_nodes):
         """Create a compressed graph that also retains eligible route nodes."""
@@ -366,8 +388,8 @@ class RouteGraph2:
             self._route_relation,
             self.eligible_nodes,
         )
-        if self._roundtrip and self._complex_graph:
-            self._complex_graph = nx.eulerize(self._complex_graph)
+        if self._roundtrip and self._complex_graph and nx.is_connected(self._complex_graph):
+            self._complex_graph = self._eulerize_graph(self._complex_graph)
 
     @staticmethod
     def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
@@ -399,26 +421,47 @@ class RouteGraph2:
 
         for start_node in retained_nodes:
             while raw_graph.degree(start_node):
-                _, current_node, edge_key, edge_data = next(
+                first_node, current_node, edge_key, edge_data = next(
                     iter(raw_graph.edges(start_node, keys=True, data=True)),
                 )
                 raw_graph.remove_edge(start_node, current_node, edge_key)
                 edge_weight = edge_data['weight']
+                edge_points = list(edge_data['points'])
+                if first_node != start_node:
+                    edge_points.reverse()
 
                 while current_node not in retained_nodes:
-                    _, next_node, next_edge_key, next_edge_data = next(
+                    first_node, next_node, next_edge_key, next_edge_data = next(
                         iter(raw_graph.edges(current_node, keys=True, data=True)),
                     )
                     raw_graph.remove_edge(current_node, next_node, next_edge_key)
                     edge_weight += next_edge_data['weight']
+                    next_points = list(next_edge_data['points'])
+                    if first_node != current_node:
+                        next_points.reverse()
+                    edge_points.extend(next_points[1:])
                     current_node = next_node
 
                 if simple_graph.has_edge(start_node, current_node):
                     simple_graph[start_node][current_node]['weight'] += edge_weight
                 else:
-                    simple_graph.add_edge(start_node, current_node, weight=edge_weight)
+                    simple_graph.add_edge(
+                        start_node,
+                        current_node,
+                        weight=edge_weight,
+                        points=edge_points,
+                    )
 
         return simple_graph
+
+    @staticmethod
+    def _eulerize_graph(graph):
+        eulerized_graph = nx.eulerize(graph)
+        for first_node, second_node, edge_key in eulerized_graph.edges(keys=True):
+            eulerized_graph[first_node][second_node][edge_key].update(
+                graph[first_node][second_node],
+            )
+        return eulerized_graph
 
     def _repair_disconnected_components(self, sampler):
         components = list(nx.connected_components(self._raw_graph))
@@ -505,6 +548,10 @@ class RouteGraph2:
                 first_node,
                 second_node,
                 weight=distance,
+                points=[
+                    self._raw_graph.nodes[first_node]['point'],
+                    self._raw_graph.nodes[second_node]['point'],
+                ],
             )
             first_component = find(component_by_node[first_node])
             second_component = find(component_by_node[second_node])

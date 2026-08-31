@@ -43,6 +43,167 @@ def load_route_regression_cases():
 
 
 class RouteGraphTests(unittest.TestCase):
+    def test_route_graph2_expands_compressed_traversal_geometry(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0010]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        graph = routes.RouteGraph2(relation, way_nodes)
+
+        self.assertEqual(
+            graph.traversal_coordinates([1, 3]),
+            [point for _, point in way_nodes[1]],
+        )
+        self.assertEqual(
+            graph.traversal_coordinates([3, 1]),
+            [point for _, point in reversed(way_nodes[1])],
+        )
+
+    def test_write_route_lines2_calculates_short_route_metadata_from_full_geometry(self):
+        class FakeElevation:
+            instances = []
+
+            def __init__(self, directory):
+                self.route_paths = []
+                self.__class__.instances.append(self)
+
+            def route_elevation(self, path):
+                self.route_paths.append(path)
+                return {
+                    'elevation_gain_m': 12,
+                    'elevation_loss_m': 3,
+                    'profile': {
+                        'segments': [{
+                            'start_m': 0,
+                            'end_m': routes.route_distance_m(path),
+                            'elevations': [100, 112],
+                            'coordinates': 'profile',
+                        }],
+                    },
+                }
+
+            @staticmethod
+            def route_duration_min(distance_m, elevation_gain_m, elevation_loss_m):
+                return 30
+
+            def close(self):
+                pass
+
+        relation = {
+            'name': 'Short route',
+            'name_int': '',
+            'symbol': '',
+            'network': 'lwn',
+            'type': 'hiking',
+            'way_ids': [1],
+            'node_roles': {'start': [1], 'end': [3]},
+        }
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0010]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        collector = types.SimpleNamespace(relations={1: relation})
+        exporter = types.SimpleNamespace(
+            way_nodes=way_nodes,
+            highway_way_ids_by_node={},
+            landmarks=[],
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+            patch.object(routes, 'Elevation', FakeElevation), \
+            patch.dict(os.environ, {'ELEVATION_DIRECTORY': directory}):
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                routes.write_route_lines2(collector, exporter)
+            finally:
+                os.chdir(previous_directory)
+
+            metadata = json.loads(Path(directory, 'routes-meta.json').read_text())
+            feature = json.loads(Path(directory, 'hiking-routes-interaction.geojsonseq').read_text())
+
+        expected_path = [point for _, point in way_nodes[1]]
+        expected_distance = routes.route_distance_m(expected_path)
+        self.assertEqual(feature['geometry']['coordinates'], expected_path)
+        self.assertEqual(metadata[0]['distance_m'], expected_distance)
+        self.assertEqual(metadata[0]['elevation_gain_m'], 12)
+        self.assertEqual(metadata[0]['elevation_loss_m'], 3)
+        self.assertEqual(metadata[0]['duration_min'], 30)
+        self.assertEqual(FakeElevation.instances[-1].route_paths, [expected_path])
+
+    def test_write_route_lines2_falls_back_to_original_geometry(self):
+        class FakeElevation:
+            instances = []
+
+            def __init__(self, directory):
+                self.route_paths = []
+                self.__class__.instances.append(self)
+
+            def route_elevation(self, path):
+                self.route_paths.append(path)
+                return {
+                    'elevation_gain_m': 0,
+                    'elevation_loss_m': 0,
+                    'profile': {'segments': []},
+                }
+
+            @staticmethod
+            def route_duration_min(distance_m, elevation_gain_m, elevation_loss_m):
+                return 15
+
+            def close(self):
+                pass
+
+        relation = {
+            'name': 'Fallback route',
+            'name_int': '',
+            'symbol': '',
+            'network': 'lwn',
+            'type': 'hiking',
+            'way_ids': [1],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0010]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        collector = types.SimpleNamespace(relations={1: relation})
+        exporter = types.SimpleNamespace(
+            way_nodes=way_nodes,
+            highway_way_ids_by_node={},
+            landmarks=[],
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+            patch.object(routes, 'Elevation', FakeElevation), \
+            patch.object(routes.RouteGraph2, 'shortest_complete_traversal_simple', return_value=None), \
+            patch.dict(os.environ, {'ELEVATION_DIRECTORY': directory}):
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                routes.write_route_lines2(collector, exporter)
+            finally:
+                os.chdir(previous_directory)
+
+            metadata = json.loads(Path(directory, 'routes-meta.json').read_text())
+            feature = json.loads(Path(directory, 'hiking-routes-interaction.geojsonseq').read_text())
+
+        expected_path = [point for _, point in way_nodes[1]]
+        self.assertEqual(feature['geometry']['coordinates'], expected_path)
+        self.assertEqual(metadata[0]['distance_m'], routes.route_distance_m(expected_path))
+        self.assertEqual(metadata[0]['duration_min'], 15)
+        self.assertEqual(FakeElevation.instances[-1].route_paths, [expected_path])
+
     def test_component_graphs_preserve_disconnected_components(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
         way_nodes = {
@@ -251,6 +412,7 @@ class RouteGraphTests(unittest.TestCase):
             node_coordinates={},
             highway_way_ids_by_node={},
             landmark_index=None,
+            landmarks=[],
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -259,7 +421,7 @@ class RouteGraphTests(unittest.TestCase):
             previous_directory = os.getcwd()
             try:
                 os.chdir(directory)
-                routes.write_route_lines(collector, exporter)
+                routes.write_route_lines2(collector, exporter)
             finally:
                 os.chdir(previous_directory)
 

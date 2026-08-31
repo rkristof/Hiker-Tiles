@@ -879,7 +879,13 @@ def write_route_lines2(collector, exporter):
                 if not route_graph.has_edges:
                     continue
 
-                if route_graph.raw_route_distance_m() < MAX_TRAVERSAL_DISTANCE_M:
+                original_lines = [
+                    [point for _, point in exporter.way_nodes.get(way_id, ())]
+                    for way_id in route_relation['way_ids']
+                ]
+
+                is_short_route = route_graph.raw_route_distance_m() < MAX_TRAVERSAL_DISTANCE_M
+                if is_short_route:
                     component_results = []
                     for component_graph in route_graph.component_graphs():
                         component_start_nodes = [
@@ -895,24 +901,95 @@ def write_route_lines2(collector, exporter):
                             eligible_node_finder,
                         )
                         if traversal is None:
-                            component_results = []
+                            component_results = None
                             break
-                        component_results.append([
-                            traversal_graph.nodes[node_id]['point']
-                            for node_id in traversal
-                        ])
+                        path = component_graph.traversal_coordinates(
+                            traversal,
+                            traversal_graph,
+                        )
+                        if len(path) < 2:
+                            component_results = None
+                            break
+                        component_results.append({
+                            'graph': component_graph,
+                            'path': path,
+                            'distance_m': route_distance_m(path),
+                            'start_node': traversal[0],
+                            'finish_node': traversal[-1],
+                        })
 
-                    lines = component_results
+                    if component_results is None:
+                        lines = original_lines
+                        endpoints = None
+                    else:
+                        lines = [result['path'] for result in component_results]
+                        endpoints = (
+                            component_results[0]
+                            if len(component_results) == 1
+                            else None
+                        )
                 else:
-                    lines = [
-                        [point for _, point in exporter.way_nodes.get(way_id, ())]
-                        for way_id in route_relation['way_ids']
-                    ]
+                    lines = original_lines
+                    endpoints = None
 
                 lines = [line for line in lines if len(line) >= 2]
 
                 if not lines:
                     continue
+
+                distance_m = None
+                elevation_gain_m = None
+                elevation_loss_m = None
+                elevation_profile = {'segments': []}
+                duration_min = None
+
+                if is_short_route:
+                    distance_m = sum(route_distance_m(line) for line in lines)
+                    elevation_gain_m = 0
+                    elevation_loss_m = 0
+                    component_durations = []
+                    distance_offset_m = 0
+                    for line in lines:
+                        line_distance_m = route_distance_m(line)
+                        elevation_data = elevation.route_elevation(line)
+                        elevation_gain_m += elevation_data['elevation_gain_m']
+                        elevation_loss_m += elevation_data['elevation_loss_m']
+                        elevation_profile['segments'].extend(
+                            offset_elevation_profile(
+                                elevation_data['profile'],
+                                distance_offset_m,
+                            )['segments']
+                        )
+                        component_durations.append(elevation.route_duration_min(
+                            line_distance_m,
+                            elevation_data['elevation_gain_m'],
+                            elevation_data['elevation_loss_m'],
+                        ))
+                        distance_offset_m += line_distance_m
+                    duration_min = sum(component_durations)
+
+                all_points = [point for line in lines for point in line]
+                route_metadata.append({
+                    'id': relation_id,
+                    'name': route_relation['name'],
+                    'name_int': route_relation.get('name_int', ''),
+                    'symbol': route_relation['symbol'],
+                    'network': route_relation['network'],
+                    'type': route_relation['type'],
+                    'min_lon': min(point[0] for point in all_points),
+                    'min_lat': min(point[1] for point in all_points),
+                    'max_lon': max(point[0] for point in all_points),
+                    'max_lat': max(point[1] for point in all_points),
+                    'distance_m': distance_m,
+                    'elevation_gain_m': elevation_gain_m,
+                    'elevation_loss_m': elevation_loss_m,
+                    'elevation_profile': elevation_profile,
+                    'duration_min': duration_min,
+                    'start_lon': endpoints['graph'].point(endpoints['start_node'])[0] if endpoints else None,
+                    'start_lat': endpoints['graph'].point(endpoints['start_node'])[1] if endpoints else None,
+                    'finish_lon': endpoints['graph'].point(endpoints['finish_node'])[0] if endpoints else None,
+                    'finish_lat': endpoints['graph'].point(endpoints['finish_node'])[1] if endpoints else None,
+                })
 
                 write_feature(
                     route_lines_file,
