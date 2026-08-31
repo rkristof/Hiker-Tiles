@@ -7,7 +7,7 @@ import osmium
 from eligible_nodes import EligibleNodeFinder, landmark_candidate
 from elevation import Elevation, offset_elevation_profile
 from route_graph import RouteGraph
-from utils import polyline_distance_m
+from utils import haversine_distance_m, polyline_distance_m
 
 
 NETWORK_GROUP_BY_TAG = {
@@ -115,7 +115,7 @@ class WayRouteCollector(osmium.SimpleHandler):
         node_roles = {}
         for member in relation.members:
             if member.type == 'n' and member.role in ('start', 'end'):
-                node_roles.setdefault(member.role, []).append(member.ref)
+                node_roles.setdefault(member.role, {})[member.ref] = None
 
         self.relations[relation.id] = {
             **route_attributes,
@@ -373,11 +373,13 @@ class GeoJSONExporter(osmium.SimpleHandler):
         way_routes,
         points_file,
         collect_landmarks=False,
+        endpoint_maps_by_node=None,
     ):
         super().__init__()
         self.way_routes = way_routes
         self.points_file = points_file
         self.collect_landmarks = collect_landmarks
+        self.endpoint_maps_by_node = endpoint_maps_by_node or {}
         self.way_count = 0
         self.point_count = 0
         self.route_symbols = set()  # unique route symbol values seen
@@ -390,12 +392,18 @@ class GeoJSONExporter(osmium.SimpleHandler):
         tags = node.tags
         landmark = landmark_candidate(tags) if self.collect_landmarks else None
         point_properties = self._point_properties(tags)
-        if landmark is None and point_properties is None:
+        if (
+            node.id not in self.endpoint_maps_by_node
+            and landmark is None
+            and point_properties is None
+        ):
             return
         try:
             point = [node.lon, node.lat]
         except osmium.InvalidLocationError:
             return
+        for endpoint_nodes in self.endpoint_maps_by_node.get(node.id, ()):
+            endpoint_nodes[node.id] = point
         if landmark is not None:
             landmark['node_id'] = node.id
             landmark['points'] = [point]
@@ -579,17 +587,52 @@ def write_route_layers(exporter):
 
 
 def export_route_features(collector):
+    def snap_relation_endpoints(exporter):
+        for route_relation in collector.relations.values():
+            route_nodes = {
+                node_id: point
+                for way_id in route_relation['way_ids']
+                for node_id, point in exporter.way_nodes.get(way_id, ())
+            }
+            for role in ('start', 'end'):
+                endpoint_nodes = route_relation.get('node_roles', {}).get(role, ())
+                if not endpoint_nodes:
+                    continue
+                route_relation['node_roles'][role] = [
+                    node_id
+                    if node_id in route_nodes
+                    else min(
+                        route_nodes,
+                        key=lambda candidate: haversine_distance_m(
+                            endpoint_nodes[node_id],
+                            route_nodes[candidate],
+                        ),
+                    )
+                    for node_id in endpoint_nodes
+                    if node_id in route_nodes or (
+                        endpoint_nodes[node_id] is not None and route_nodes
+                    )
+                ]
+
     with open('natural-points.geojsonseq', 'w') as points_file:
         collect_landmarks = any(
             not route_relation.get('node_roles', {}).get('start')
             for route_relation in collector.relations.values()
         )
+        endpoint_maps_by_node = {}
+        for route_relation in collector.relations.values():
+            for role in ('start', 'end'):
+                endpoint_nodes = route_relation.get('node_roles', {}).get(role, ())
+                for node_id in endpoint_nodes:
+                    endpoint_maps_by_node.setdefault(node_id, []).append(endpoint_nodes)
         exporter = GeoJSONExporter(
             collector.way_routes,
             points_file,
             collect_landmarks=collect_landmarks,
+            endpoint_maps_by_node=endpoint_maps_by_node,
         )
         exporter.apply_file('tiles-filtered.osm.pbf', locations=True)
+        snap_relation_endpoints(exporter)
         route_node_ids = {
             node_id
             for nodes in exporter.way_nodes.values()

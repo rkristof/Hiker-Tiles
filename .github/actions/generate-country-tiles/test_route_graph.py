@@ -480,6 +480,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertFalse(collector.relations[1]['node_roles'].get('start'))
         self.assertTrue(collector.relations[2]['node_roles'].get('start'))
+        self.assertEqual(collector.relations[2]['node_roles']['start'], {20: None})
         self.assertEqual(collector.relations[2]['node_ids'], [20])
         self.assertEqual(collector.relations[2]['name'], 'A - B')
         self.assertTrue(collector.relations[2]['roundtrip'])
@@ -1022,12 +1023,12 @@ class RouteGraphTests(unittest.TestCase):
         self.assertNotIn(99, graph._graph)
 
     # Regression routes included in the fixture (relation ID: name):
-    # - 1524566: ZT, Gyadai tanösvény
+    # - 1524566: ZT, Gyadai tanösvény (roundtrip)
     # - 2499633: S↺, Thirring körút (Dobogókő, elágazás – Thirring-sziklák – Dobogókő, elágazás)
     # - 14643735: Rám-szakadék tanösvény (Dömös - Rám-szakadék - Dömös)
     # - 4120196: Oszoly-ösvény (Csobánka, Oszoly-pihenő – Oszoly-csúcs)
-    # - 5845823: KT, Kékkő tanösvény
-    # - 10093867: Hajta természetismereti túra
+    # - 5845823: KT, Kékkő tanösvény (roundtrip)
+    # - 10093867: Hajta természetismereti túra (roundtrip)
     # - 16122238: ST209 Esztergom - Dobogókő
     # - 11134335: Sóvirág tanösvény (two-way circular relation)
     # - 15865671: Fent és lent – Tanösvény a Guckler Károly úton
