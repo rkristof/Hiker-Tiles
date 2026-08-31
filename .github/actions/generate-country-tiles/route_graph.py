@@ -57,11 +57,9 @@ class RouteGraph:
         ):
             self._roundtrip = True
 
-        self._create_simple_graph()
-
     @property
     def has_edges(self):
-        return self._graph.number_of_edges() > 0
+        return self._raw_graph.number_of_edges() > 0
 
     @property
     def component_count(self):
@@ -95,7 +93,7 @@ class RouteGraph:
                 self._raw_graph,
                 next(iter(component)),
             )
-            component_graph._raw_graph = self._raw_graph.subgraph(raw_component).copy()
+            component_graph._raw_graph = self._raw_graph.subgraph(raw_component)
             component_graph._graph = self._graph.subgraph(component).copy()
             component_graph._complex_graph = None
             component_graphs.append(component_graph)

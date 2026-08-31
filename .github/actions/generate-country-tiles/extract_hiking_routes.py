@@ -701,8 +701,11 @@ def write_route_lines(collector, exporter):
                     for way_id in route_relation['way_ids']
                 ]
 
-                is_short_route = route_graph.raw_route_distance_m() < MAX_TRAVERSAL_DISTANCE_M
+                distance_m = route_graph.raw_route_distance_m()
+                
+                is_short_route = distance_m < MAX_TRAVERSAL_DISTANCE_M
                 if is_short_route:
+                    route_graph._create_simple_graph()
                     component_results = []
                     for component_graph in route_graph.component_graphs():
                         component_start_nodes = [
@@ -753,7 +756,6 @@ def write_route_lines(collector, exporter):
                 if not lines:
                     continue
 
-                distance_m = None
                 elevation_gain_m = None
                 elevation_loss_m = None
                 elevation_profile = {'segments': []}
