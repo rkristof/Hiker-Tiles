@@ -1087,6 +1087,22 @@ class RouteGraphTests(unittest.TestCase):
         steep_graph = routes.RouteGraph(relation, way_nodes, sampler=SteepSampler())
         self.assertEqual(steep_graph.component_count, 2)
 
+    def test_close_odd_endpoints_repair_multiple_pairs_without_sampler(self):
+        relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
+        way_nodes = {
+            1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0010])],
+            2: [(0, [0.0000, 0.0000]), (2, [0.0011, 0.0010])],
+            3: [(0, [0.0000, 0.0000]), (3, [-0.0010, -0.0010])],
+            4: [(0, [0.0000, 0.0000]), (4, [-0.0011, -0.0010])],
+        }
+
+        graph = routes.RouteGraph(relation, way_nodes)
+
+        self.assertEqual(graph._raw_graph.number_of_edges(), 6)
+        self.assertTrue(
+            all(degree % 2 == 0 for _, degree in graph._raw_graph.degree())
+        )
+
     def test_explicit_marker_outside_route_nodes_is_not_added(self):
         relation = {'way_ids': [1], 'node_roles': {'start': [99]}}
         way_nodes = {1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])]}

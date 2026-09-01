@@ -47,6 +47,7 @@ class RouteGraph:
                 )
 
         self._repair_disconnected_components(sampler)
+        self._repair_close_odd_endpoints(sampler)
 
         if (
             not self._roundtrip
@@ -481,34 +482,59 @@ class RouteGraph:
             for component_index, component in enumerate(components)
             for node_id in component
         }
+        self._repair_endpoint_pairs(sampler, 100, component_by_node)
+
+    def _repair_close_odd_endpoints(self, sampler):
+        self._repair_endpoint_pairs(sampler, 30)
+
+    def _repair_endpoint_pairs(
+        self,
+        sampler,
+        max_distance,
+        component_by_node=None,
+    ):
         endpoints = [
             node_id
             for node_id in self._raw_graph
             if self._raw_graph.degree(node_id) == 1
         ]
-        elevations = {
-            node_id: sampler.sample(self._raw_graph.nodes[node_id]['point'])
-            for node_id in endpoints
-        }
+        if len(endpoints) < 2:
+            return
+
+        elevations = None
+        if sampler is not None:
+            elevations = {
+                node_id: sampler.sample(self._raw_graph.nodes[node_id]['point'])
+                for node_id in endpoints
+            }
+
         candidates = {node_id: [] for node_id in endpoints}
         for first_index, first_node in enumerate(endpoints):
-            if elevations[first_node] is None:
+            if elevations is not None and elevations[first_node] is None:
                 continue
             first_point = self._raw_graph.nodes[first_node]['point']
             for second_node in endpoints[first_index + 1:]:
                 if (
-                    component_by_node[first_node]
-                    == component_by_node[second_node]
-                    or elevations[second_node] is None
+                    component_by_node is not None
+                    and self._same_component(
+                        component_by_node,
+                        first_node,
+                        second_node,
+                    )
                 ):
                     continue
-                if abs(elevations[first_node] - elevations[second_node]) >= 15:
+                if elevations is not None and elevations[second_node] is None:
+                    continue
+                if (
+                    elevations is not None
+                    and abs(elevations[first_node] - elevations[second_node]) >= 15
+                ):
                     continue
                 distance = haversine_distance_m(
                     first_point,
                     self._raw_graph.nodes[second_node]['point'],
                 )
-                if distance >= 100:
+                if distance >= max_distance:
                     continue
                 candidates[first_node].append((distance, second_node))
                 candidates[second_node].append((distance, first_node))
@@ -516,13 +542,11 @@ class RouteGraph:
         for node_candidates in candidates.values():
             node_candidates.sort()
 
-        parent = list(range(len(components)))
-
-        def find(component_index):
-            while parent[component_index] != component_index:
-                parent[component_index] = parent[parent[component_index]]
-                component_index = parent[component_index]
-            return component_index
+        parent = (
+            list(range(len(set(component_by_node.values()))))
+            if component_by_node is not None
+            else None
+        )
 
         active_endpoints = set(endpoints)
         while active_endpoints:
@@ -532,8 +556,15 @@ class RouteGraph:
                     candidate
                     for candidate in candidates[node_id]
                     if candidate[1] in active_endpoints
-                    and find(component_by_node[candidate[1]])
-                    != find(component_by_node[node_id])
+                    and (
+                        component_by_node is None
+                        or not self._same_component(
+                            component_by_node,
+                            node_id,
+                            candidate[1],
+                            parent,
+                        )
+                    )
                 ][:2]
                 if valid:
                     nearest[node_id] = (
@@ -561,8 +592,34 @@ class RouteGraph:
                     self._raw_graph.nodes[second_node]['point'],
                 ],
             )
-            first_component = find(component_by_node[first_node])
-            second_component = find(component_by_node[second_node])
-            parent[second_component] = first_component
+            if component_by_node is not None:
+                first_component = self._component_root(
+                    component_by_node[first_node],
+                    parent,
+                )
+                second_component = self._component_root(
+                    component_by_node[second_node],
+                    parent,
+                )
+                parent[second_component] = first_component
             active_endpoints.remove(first_node)
             active_endpoints.remove(second_node)
+
+    @staticmethod
+    def _component_root(component_index, parent):
+        while parent[component_index] != component_index:
+            parent[component_index] = parent[parent[component_index]]
+            component_index = parent[component_index]
+        return component_index
+
+    @staticmethod
+    def _same_component(component_by_node, first_node, second_node, parent=None):
+        if parent is None:
+            return component_by_node[first_node] == component_by_node[second_node]
+        return RouteGraph._component_root(
+            component_by_node[first_node],
+            parent,
+        ) == RouteGraph._component_root(
+            component_by_node[second_node],
+            parent,
+        )
