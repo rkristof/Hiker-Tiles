@@ -307,6 +307,7 @@ class HighwayAccessCollector(osmium.SimpleHandler):
         self._component_has_access = bytearray()
         self._way_index_by_node = {}
         self._route_way_indices_by_node = {}
+        self._highway_type_by_way_id = {}
 
     def way(self, way):
         highway_type = way.tags.get('highway')
@@ -314,6 +315,7 @@ class HighwayAccessCollector(osmium.SimpleHandler):
             return
         way_index = len(self._way_ids)
         self._way_ids.append(way.id)
+        self._highway_type_by_way_id[way.id] = highway_type
         self._way_parent.append(way_index)
         self._way_rank.append(0)
         self._component_has_access.append(
@@ -342,6 +344,9 @@ class HighwayAccessCollector(osmium.SimpleHandler):
                 accessible_way_ids_by_node[node_id] = accessible_way_ids
         return accessible_way_ids_by_node
 
+    def highway_type_by_way_id(self):
+        return self._highway_type_by_way_id
+
     def _find(self, way_index):
         while self._way_parent[way_index] != way_index:
             self._way_parent[way_index] = self._way_parent[self._way_parent[way_index]]
@@ -364,7 +369,10 @@ class HighwayAccessCollector(osmium.SimpleHandler):
 def collect_highway_way_ids_by_node(pbf_path, route_node_ids):
     collector = HighwayAccessCollector(route_node_ids)
     collector.apply_file(pbf_path)
-    return collector.accessible_highway_way_ids_by_node()
+    return (
+        collector.accessible_highway_way_ids_by_node(),
+        collector.highway_type_by_way_id(),
+    )
 
 
 class GeoJSONExporter(osmium.SimpleHandler):
@@ -638,7 +646,10 @@ def export_route_features(collector):
             for nodes in exporter.way_nodes.values()
             for node_id, _ in nodes
         }
-        exporter.highway_way_ids_by_node = collect_highway_way_ids_by_node(
+        (
+            exporter.highway_way_ids_by_node,
+            exporter.highway_type_by_way_id,
+        ) = collect_highway_way_ids_by_node(
             'highways-filtered.osm.pbf',
             route_node_ids,
         )
@@ -673,37 +684,17 @@ def write_route_lines(collector, exporter):
             traversal = route_graph.shortest_complete_traversal_simple(start_node, finish_node)
         else:
             start_candidates = eligible_node_finder.rank_eligible_nodes()
+            start_node = start_candidates[0] if start_candidates else None
+            route_graph._create_complex_graph((start_node,) if start_node is not None else ())
             if route_graph.is_eulerian():
-                route_graph._create_complex_graph(start_candidates)
-                traversal = route_graph.complex_eulerian_traversal()
+                traversal = route_graph.complex_eulerian_traversal(start_node)
                 traversal_graph = route_graph._complex_graph
             else:
-                finish_candidates = eligible_node_finder.rank_eligible_nodes(is_start=False)[:10]
-                route_graph._create_complex_graph((*start_candidates, *finish_candidates))
-                shortest_candidate = None
-                shortest_candidate_distance = float('inf')
-                finish_candidates = [
-                    node_id
-                    for node_id in finish_candidates
-                    if node_id in route_graph._complex_graph
-                ]
-                for start_node in route_graph.eligible_nodes:
-                    for finish_node in finish_candidates:
-                        if finish_node == start_node:
-                            continue
-                        candidate_traversal = route_graph.shortest_complete_traversal_complex(
-                            start_node,
-                            finish_node,
-                        )
-                        if candidate_traversal is None:
-                            continue
-                        candidate_distance = route_graph.traversal_distance_complex(
-                            candidate_traversal,
-                        )
-                        if candidate_distance < shortest_candidate_distance:
-                            shortest_candidate = candidate_traversal
-                            shortest_candidate_distance = candidate_distance
-                traversal = shortest_candidate
+                traversal = (
+                    route_graph.shortest_complete_traversal_complex(start_node, None)
+                    if start_node is not None
+                    else None
+                )
                 if traversal is not None:
                     traversal_graph = route_graph._complex_graph
 
@@ -729,6 +720,7 @@ def write_route_lines(collector, exporter):
                         for node_id, _ in exporter.way_nodes.get(way_id, ())
                     },
                     exporter.landmarks,
+                    exporter.highway_type_by_way_id,
                 )
                 route_graph = RouteGraph(
                     route_relation,

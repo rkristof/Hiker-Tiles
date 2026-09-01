@@ -14,7 +14,6 @@ class RouteGraph:
         roundtrip=False,
     ):
         self._route_relation = route_relation
-        self.eligible_nodes = ()
         self._roundtrip = roundtrip
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
@@ -158,17 +157,13 @@ class RouteGraph:
             coordinates.extend(points[1:])
         return coordinates
 
-    def complex_eulerian_traversal(self):
+    def complex_eulerian_traversal(self, start_node):
         """Return an Eulerian traversal from an eligible or ordered graph node."""
         graph = self._complex_graph
         if not graph or not nx.is_connected(graph) or not nx.is_eulerian(graph):
             return None
 
-        start_node = next(
-            (node_id for node_id in self.eligible_nodes if node_id in graph),
-            None,
-        )
-        if start_node is None:
+        if start_node not in graph:
             start_node = min(graph, key=self._relation_node_order.__getitem__)
 
         return [
@@ -386,17 +381,13 @@ class RouteGraph:
 
     def _create_complex_graph(self, eligible_nodes):
         """Create a compressed graph that also retains eligible route nodes."""
-        self.eligible_nodes = tuple(
-            dict.fromkeys(
-                node_id
-                for node_id in eligible_nodes
-                if node_id in self._raw_graph
-            )
+        eligible_nodes = tuple(
+            dict.fromkeys(node_id for node_id in eligible_nodes if node_id in self._raw_graph)
         )
         self._complex_graph = RouteGraph._create_compressed_graph(
             self._raw_graph,
             self._route_relation,
-            self.eligible_nodes,
+            eligible_nodes,
         )
         if self._roundtrip and self._complex_graph and nx.is_connected(self._complex_graph):
             self._complex_graph = self._eulerize_graph(self._complex_graph)

@@ -564,6 +564,32 @@ class RouteGraphTests(unittest.TestCase):
         collector.way(Way(20, 'residential', [1, 2]))
 
         self.assertEqual(collector.accessible_highway_way_ids_by_node(), {2: {20}})
+        self.assertEqual(collector.highway_type_by_way_id(), {20: 'residential'})
+
+    def test_eligible_node_score_counts_external_highway_class_instances(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0000]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        finder = routes.EligibleNodeFinder(
+            relation,
+            way_nodes,
+            {1: {10, 11}, 2: {12}},
+            {1, 2},
+            highway_type_by_way_id={
+                10: 'path',
+                11: 'path',
+                12: 'motorway',
+            },
+        )
+
+        self.assertEqual(finder._route_degree(1), 1)
+        self.assertEqual(finder._external_access_score(1), 2)
+        self.assertEqual(finder._external_access_score(2), 12)
 
     def test_highway_access_collector_connects_paths_to_access_highways(self):
         class Node:
@@ -763,7 +789,7 @@ class RouteGraphTests(unittest.TestCase):
             }],
         )
 
-        self.assertEqual(finder.rank_eligible_nodes(), [4, 1])
+        self.assertEqual(finder.rank_eligible_nodes(), [4])
 
     def test_explicit_start_ignores_landmarks(self):
         relation = {
