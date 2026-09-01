@@ -20,7 +20,12 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 import extract_hiking_routes as routes
-from eligible_nodes import LandmarkIndex, landmark_candidate
+from eligible_nodes import (
+    LANDMARK_IDENTITY_SCORE,
+    LANDMARK_TEXT_SCORE,
+    LandmarkIndex,
+    landmark_candidate,
+)
 
 
 class ConstantSampler:
@@ -590,7 +595,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(finder.externally_accessible_nodes(), {2, 3})
         self.assertEqual(finder._route_degree(1), 1)
-        self.assertEqual(finder._external_access_score(1), 2)
+        self.assertEqual(finder._external_access_score(1), 1.5)
         self.assertEqual(finder._external_access_score(2), 1)
 
     def test_highway_access_collector_connects_paths_to_access_highways(self):
@@ -769,6 +774,42 @@ class RouteGraphTests(unittest.TestCase):
         )
 
         self.assertEqual(finder._landmark_nodes(), set())
+
+    def test_landmark_identity_counts_below_text_match(self):
+        relation = {
+            'name': 'Blue Route',
+            'way_ids': [1, 2, 3],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+            2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
+            3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
+        }
+        finder = routes.EligibleNodeFinder(
+            relation,
+            way_nodes,
+            {1: {99}, 2: {98}},
+            {1, 2},
+            [
+                {
+                    'node_id': 1,
+                    'points': [[0.0000, 0.0000]],
+                },
+                {
+                    'node_id': 2,
+                    'name': 'Blue Route entrance',
+                    'points': [[0.0010, 0.0000]],
+                },
+            ],
+            {99: 'path', 98: 'path'},
+        )
+
+        landmark_scores = finder._landmark_scores()
+
+        self.assertEqual(landmark_scores[1], LANDMARK_IDENTITY_SCORE)
+        self.assertEqual(landmark_scores[2], LANDMARK_TEXT_SCORE)
+        self.assertEqual(finder.rank_eligible_nodes(), [2])
 
     def test_missing_endpoints_use_landmark_for_equal_endpoint_orientations(self):
         relation = {

@@ -13,6 +13,9 @@ LANDMARK_RULES = (
 )
 LANDMARK_MAX_DISTANCE_M = 30
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
+LANDMARK_TEXT_SCORE = 30
+LANDMARK_IDENTITY_SCORE = 20
+EXTERNAL_ACCESS_DECAY = 0.5
 HIGH_HIGHWAY_TYPES = frozenset((
     'motorway',
     'trunk',
@@ -129,7 +132,7 @@ class EligibleNodeFinder:
     def rank_eligible_nodes(self):
         """Return externally accessible nodes ordered by weighted start score."""
         eligible_nodes = self.externally_accessible_nodes()
-        landmark_nodes = self._landmark_nodes()
+        landmark_scores = self._landmark_scores()
         external_scores = {
             node_id: self._external_access_score(node_id)
             for node_id in eligible_nodes
@@ -139,23 +142,21 @@ class EligibleNodeFinder:
             eligible_nodes,
             key=lambda node_id: self._endpoint_score(
                 node_id,
-                landmark_nodes,
+                landmark_scores.get(node_id, 0),
                 external_scores[node_id],
                 maximum_external_score,
             ),
             reverse=True,
         )[:self.MAX_RANKED_NODES]
 
-    def _landmark_nodes(self):
+    def _landmark_scores(self):
         route_tokens = self._text_token_list(
             self._route_relation.get('name', ''),
             self._route_relation.get('name_int', ''),
         )
-        if not route_tokens:
-            return set()
 
         landmark_index = LandmarkIndex(self._landmarks)
-        landmark_nodes = set()
+        landmark_scores = {}
         for node_id in self._candidate_node_ids:
             node_points = [
                 point
@@ -165,12 +166,22 @@ class EligibleNodeFinder:
             ]
             for point in node_points:
                 for landmark, landmark_point in landmark_index.nearby(point):
-                    if self._matches_landmark(point, landmark_point, route_tokens, landmark):
-                        landmark_nodes.add(node_id)
-                        break
-                if node_id in landmark_nodes:
-                    break
-        return landmark_nodes
+                    if landmark.get('node_id') == node_id:
+                        landmark_scores[node_id] = max(
+                            landmark_scores.get(node_id, 0),
+                            LANDMARK_IDENTITY_SCORE,
+                        )
+                    if route_tokens and self._matches_landmark(
+                        point,
+                        landmark_point,
+                        route_tokens,
+                        landmark,
+                    ):
+                        landmark_scores[node_id] = LANDMARK_TEXT_SCORE
+        return landmark_scores
+
+    def _landmark_nodes(self):
+        return set(self._landmark_scores())
 
     def _matches_landmark(self, route_point, landmark_point, route_tokens, landmark):
         if haversine_distance_m(route_point, landmark_point) > LANDMARK_MAX_DISTANCE_M:
@@ -187,7 +198,7 @@ class EligibleNodeFinder:
     def _endpoint_score(
         self,
         node_id,
-        landmark_nodes,
+        landmark_score,
         external_access_score,
         maximum_external_score,
     ):
@@ -205,14 +216,18 @@ class EligibleNodeFinder:
         )
         route_degree_score = float(self._route_degree(node_id) == 1)
         return (
-            30 * float(node_id in landmark_nodes)
+            landmark_score
             + 30 * route_degree_score
             + 10 * order_score
             + 30 * external_score
         )
 
     def _external_access_score(self, node_id):
-        return len(self._external_highway_way_ids(node_id))
+        external_way_count = len(self._external_highway_way_ids(node_id))
+        return sum(
+            EXTERNAL_ACCESS_DECAY ** index
+            for index in range(external_way_count)
+        )
 
     def _external_highway_way_ids(self, node_id):
         return {
