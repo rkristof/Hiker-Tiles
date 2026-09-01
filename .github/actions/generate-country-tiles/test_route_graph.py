@@ -836,6 +836,48 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(landmark_scores[2], LANDMARK_TEXT_SCORE)
         self.assertEqual(finder.rank_eligible_nodes(), [2])
 
+    def test_numbered_landmark_score_decreases_with_number_and_is_capped(self):
+        relation = {
+            'name': 'Geological trail',
+            'way_ids': [1],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0010, 0.0000]),
+                (3, [0.0020, 0.0000]),
+            ],
+        }
+        finder = routes.EligibleNodeFinder(
+            relation,
+            way_nodes,
+            {},
+            {1, 2, 3},
+            [
+                {'points': [[0.0000, 0.0000]], 'name': '1. Geological trail'},
+                {'points': [[0.0010, 0.0000]], 'description': '3. Geological trail'},
+                {'points': [[0.0020, 0.0000]], 'name': '12. Geological trail'},
+            ],
+        )
+
+        self.assertEqual(
+            finder._landmark_score_multiplier(finder._landmarks[0]),
+            1,
+        )
+        self.assertEqual(
+            finder._landmark_score_multiplier(finder._landmarks[1]),
+            0.8,
+        )
+        self.assertEqual(
+            finder._landmark_score_multiplier(finder._landmarks[2]),
+            0.1,
+        )
+        self.assertEqual(
+            finder._landmark_scores(),
+            {1: LANDMARK_TEXT_SCORE, 2: 24.0, 3: 3.0},
+        )
+
     def test_missing_endpoints_use_landmark_for_equal_endpoint_orientations(self):
         relation = {
             'name': 'Route',

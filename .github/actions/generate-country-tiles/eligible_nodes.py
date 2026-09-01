@@ -13,8 +13,8 @@ LANDMARK_RULES = (
 )
 LANDMARK_MAX_DISTANCE_M = 30
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
-LANDMARK_TEXT_SCORE = 30
-LANDMARK_IDENTITY_SCORE = 20
+LANDMARK_TEXT_SCORE = 1
+LANDMARK_IDENTITY_SCORE = 0.5
 EXTERNAL_ACCESS_DECAY = 0.5
 HIGH_HIGHWAY_ACCESS_BONUS = 1
 HIGH_HIGHWAY_TYPES = frozenset((
@@ -159,19 +159,31 @@ class EligibleNodeFinder:
             ]
             for point in node_points:
                 for landmark, landmark_point in landmark_index.nearby(point):
+                    landmark_score = 0
+                    landmark_multiplier = self._landmark_score_multiplier(landmark)
                     if landmark.get('node_id') == node_id:
-                        landmark_scores[node_id] = max(
-                            landmark_scores.get(node_id, 0),
-                            LANDMARK_IDENTITY_SCORE,
-                        )
+                        landmark_score = LANDMARK_IDENTITY_SCORE
                     if route_tokens and self._matches_landmark(
                         point,
                         landmark_point,
                         route_tokens,
                         landmark,
                     ):
-                        landmark_scores[node_id] = LANDMARK_TEXT_SCORE
+                        landmark_score = max(landmark_score, LANDMARK_TEXT_SCORE)
+                    if landmark_score:
+                        landmark_scores[node_id] = max(
+                            landmark_scores.get(node_id, 0),
+                            landmark_score * landmark_multiplier,
+                        )
         return landmark_scores
+
+    @staticmethod
+    def _landmark_score_multiplier(landmark):
+        for value in ('name', 'description'):
+            match = re.match(r'^\s*(\d+)\.', landmark.get(value, ''))
+            if match:
+                return max(0.1, 1 - (int(match.group(1)) - 1) * 0.1)
+        return 1
 
     def _landmark_nodes(self):
         return set(self._landmark_scores())
@@ -209,10 +221,10 @@ class EligibleNodeFinder:
         )
         route_degree_score = float(self._route_degree(node_id) == 1)
         return (
-            landmark_score
-            + 30 * route_degree_score
-            + 10 * order_score
-            + 30 * external_score
+            40 * landmark_score
+            + 15 * route_degree_score
+            + 5 * order_score
+            + 40 * external_score
         )
 
     def _external_access_score(self, node_id):
