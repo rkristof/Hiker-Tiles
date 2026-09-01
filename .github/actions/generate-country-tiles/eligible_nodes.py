@@ -15,6 +15,13 @@ LANDMARK_MAX_DISTANCE_M = 30
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
 LANDMARK_TEXT_SCORE = 1
 LANDMARK_IDENTITY_SCORE = 0.5
+SETTLEMENT_MAX_DISTANCE_M = 5000
+SETTLEMENT_WEIGHTS = {
+    'city': 1,
+    'town': 1,
+    'village': 0.8,
+    'hamlet': 0.4,
+}
 EXTERNAL_ACCESS_DECAY = 0.5
 HIGH_HIGHWAY_ACCESS_BONUS = 1
 HIGH_HIGHWAY_TYPES = frozenset((
@@ -45,8 +52,9 @@ def landmark_candidate(tags):
 class LandmarkIndex:
     """Index landmark points so matching checks only nearby candidates."""
 
-    def __init__(self, landmarks):
+    def __init__(self, landmarks, max_distance_m=LANDMARK_MAX_DISTANCE_M):
         self._landmarks = tuple(landmarks)
+        self._max_distance_m = max_distance_m
         self._cells = {}
         for landmark in self._landmarks:
             for point in landmark.get('points', ()):
@@ -55,7 +63,7 @@ class LandmarkIndex:
 
     def nearby(self, point):
         """Yield indexed landmark points within the maximum distance window."""
-        latitude_radius = math.degrees(LANDMARK_MAX_DISTANCE_M / 6371000)
+        latitude_radius = math.degrees(self._max_distance_m / 6371000)
         longitude_radius = latitude_radius / max(math.cos(math.radians(point[1])), 1e-6)
         latitude_cell, longitude_cell = self._cell(point)
         latitude_range = range(
@@ -91,6 +99,7 @@ class EligibleNodeFinder:
         candidate_node_ids,
         landmarks=None,
         highway_type_by_way_id=None,
+        settlements=None,
     ):
         self._route_relation = route_relation
         self._way_nodes = way_nodes
@@ -98,6 +107,7 @@ class EligibleNodeFinder:
         self._candidate_node_ids = set(candidate_node_ids)
         self._route_way_ids = set(route_relation.get('way_ids', ()))
         self._landmarks = tuple(landmarks or ())
+        self._settlements = tuple(settlements or ())
         self._highway_type_by_way_id = highway_type_by_way_id or {}
         self._relation_node_order = {}
 
@@ -126,6 +136,7 @@ class EligibleNodeFinder:
         """Return externally accessible nodes ordered by weighted start score."""
         eligible_nodes = self.externally_accessible_nodes()
         landmark_scores = self._landmark_scores()
+        settlement_scores = self._settlement_scores()
         external_scores = {
             node_id: self._external_access_score(node_id)
             for node_id in eligible_nodes
@@ -136,6 +147,7 @@ class EligibleNodeFinder:
             key=lambda node_id: self._endpoint_score(
                 node_id,
                 landmark_scores.get(node_id, 0),
+                settlement_scores.get(node_id, 0),
                 external_scores[node_id],
                 maximum_external_score,
             ),
@@ -188,6 +200,28 @@ class EligibleNodeFinder:
     def _landmark_nodes(self):
         return set(self._landmark_scores())
 
+    def _settlement_scores(self):
+        settlement_index = LandmarkIndex(
+            [
+                {
+                    'place': settlement['place'],
+                    'points': [settlement['point']],
+                }
+                for settlement in self._settlements
+            ],
+            SETTLEMENT_MAX_DISTANCE_M,
+        )
+        scores = {}
+        for node_id in self._candidate_node_ids:
+            for point in self._node_points(node_id):
+                for settlement, settlement_point in settlement_index.nearby(point):
+                    distance = haversine_distance_m(point, settlement_point)
+                    proximity = max(0, 1 - distance / SETTLEMENT_MAX_DISTANCE_M)
+                    score = SETTLEMENT_WEIGHTS[settlement['place']] * proximity
+                    if score:
+                        scores[node_id] = max(scores.get(node_id, 0), score)
+        return scores
+
     def _matches_landmark(self, route_point, landmark_point, route_tokens, landmark):
         if haversine_distance_m(route_point, landmark_point) > LANDMARK_MAX_DISTANCE_M:
             return False
@@ -204,6 +238,7 @@ class EligibleNodeFinder:
         self,
         node_id,
         landmark_score,
+        settlement_score,
         external_access_score,
         maximum_external_score,
     ):
@@ -221,10 +256,11 @@ class EligibleNodeFinder:
         )
         route_degree_score = float(self._route_degree(node_id) == 1)
         return (
-            40 * landmark_score
+            30 * landmark_score
+            + 30 * settlement_score
             + 15 * route_degree_score
             + 5 * order_score
-            + 40 * external_score
+            + 20 * external_score
         )
 
     def _external_access_score(self, node_id):
@@ -263,6 +299,14 @@ class EligibleNodeFinder:
                 if index + 1 < len(nodes) and nodes[index + 1][0] != node_id:
                     neighbors.add(nodes[index + 1][0])
         return len(neighbors)
+
+    def _node_points(self, node_id):
+        return [
+            point
+            for way_id in self._route_relation.get('way_ids', ())
+            for candidate_node_id, point in self._way_nodes.get(way_id, ())
+            if candidate_node_id == node_id
+        ]
 
     @staticmethod
     def _text_token_list(*values):

@@ -777,6 +777,52 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(len(nearby), 1)
         self.assertIs(nearby[0][0], landmarks[0])
 
+    def test_settlement_scores_use_type_weights_and_distance_cutoff(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0500, 0.0000]),
+                (3, [0.1000, 0.0000]),
+                (4, [0.1500, 0.0000]),
+                (5, [0.2000, 0.0000]),
+            ],
+        }
+        finder = routes.EligibleNodeFinder(
+            relation,
+            way_nodes,
+            {},
+            {1, 2, 3, 4, 5},
+            settlements=[
+                {'place': 'city', 'point': [0.0000, 0.0000]},
+                {'place': 'village', 'point': [0.0500, 0.0000]},
+                {'place': 'hamlet', 'point': [0.1000, 0.0000]},
+                {'place': 'isolated_dwelling', 'point': [0.1500, 0.0000]},
+            ],
+        )
+
+        scores = finder._settlement_scores()
+
+        self.assertEqual(scores[1], 1)
+        self.assertEqual(scores[2], 0.85)
+        self.assertEqual(scores[3], 0.6)
+        self.assertEqual(scores[4], 0.3)
+        self.assertNotIn(5, scores)
+
+    def test_settlement_nodes_are_collected(self):
+        exporter = routes.GeoJSONExporter({}, io.StringIO(), collect_landmarks=True)
+        exporter.node(types.SimpleNamespace(
+            id=1,
+            lon=20.0,
+            lat=48.0,
+            tags={'place': 'town'},
+        ))
+
+        self.assertEqual(
+            exporter.settlements,
+            [{'place': 'town', 'point': [20.0, 48.0]}],
+        )
+
     def test_landmark_distance_limit_is_enforced(self):
         relation = {
             'name': 'Route',

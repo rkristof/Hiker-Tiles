@@ -90,6 +90,7 @@ runs:
           n/checkpoint=hiking \
           n/highway=trailhead n/information=guidepost n/information=map \
           n/information=board n/tourism=information \
+          n/place=city n/place=town n/place=village n/place=hamlet \
           n/natural=peak n/natural=cave_entrance n/natural=volcano \
           -o tiles-filtered.osm.pbf
         osmium tags-filter -R tiles-latest.osm.pbf w/highway \
