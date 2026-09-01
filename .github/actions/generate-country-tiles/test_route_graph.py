@@ -583,20 +583,22 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {10, 11}, 2: {12}, 3: {13}},
+            {1: {10, 11}, 2: {12, 14}, 3: {13}},
             {1, 2, 3},
             highway_type_by_way_id={
                 10: 'path',
                 11: 'path',
                 12: 'motorway',
+                14: 'trunk',
                 13: 'residential',
             },
         )
 
-        self.assertEqual(finder.externally_accessible_nodes(), {2, 3})
+        self.assertEqual(finder.externally_accessible_nodes(), {1, 2, 3})
         self.assertEqual(finder._route_degree(1), 1)
         self.assertEqual(finder._external_access_score(1), 1.5)
-        self.assertEqual(finder._external_access_score(2), 1)
+        self.assertEqual(finder._external_access_score(2), 3)
+        self.assertGreater(finder._external_access_score(2), finder._external_access_score(1))
 
     def test_highway_access_collector_connects_paths_to_access_highways(self):
         class Node:

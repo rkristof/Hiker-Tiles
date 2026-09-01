@@ -16,6 +16,7 @@ LANDMARK_GRID_SIZE_DEGREES = 0.0005
 LANDMARK_TEXT_SCORE = 30
 LANDMARK_IDENTITY_SCORE = 20
 EXTERNAL_ACCESS_DECAY = 0.5
+HIGH_HIGHWAY_ACCESS_BONUS = 1
 HIGH_HIGHWAY_TYPES = frozenset((
     'motorway',
     'trunk',
@@ -119,15 +120,7 @@ class EligibleNodeFinder:
             for node_id in self._candidate_node_ids
             if self._external_highway_way_ids(node_id)
         }
-        high_nodes = {
-            node_id
-            for node_id in eligible_nodes
-            if any(
-                self._highway_type_by_way_id.get(way_id) in HIGH_HIGHWAY_TYPES
-                for way_id in self._external_highway_way_ids(node_id)
-            )
-        }
-        return high_nodes or eligible_nodes
+        return eligible_nodes
 
     def rank_eligible_nodes(self):
         """Return externally accessible nodes ordered by weighted start score."""
@@ -223,11 +216,21 @@ class EligibleNodeFinder:
         )
 
     def _external_access_score(self, node_id):
-        external_way_count = len(self._external_highway_way_ids(node_id))
-        return sum(
+        external_way_ids = self._external_highway_way_ids(node_id)
+        access_score = sum(
             EXTERNAL_ACCESS_DECAY ** index
-            for index in range(external_way_count)
+            for index in range(len(external_way_ids))
         )
+        high_way_ids = {
+            way_id
+            for way_id in external_way_ids
+            if self._highway_type_by_way_id.get(way_id) in HIGH_HIGHWAY_TYPES
+        }
+        high_highway_score = HIGH_HIGHWAY_ACCESS_BONUS * sum(
+            EXTERNAL_ACCESS_DECAY ** index
+            for index in range(len(high_way_ids))
+        )
+        return access_score + high_highway_score
 
     def _external_highway_way_ids(self, node_id):
         return {
