@@ -4,7 +4,12 @@ from array import array
 
 import osmium
 
-from eligible_nodes import EligibleNodeFinder, SETTLEMENT_WEIGHTS, landmark_candidate
+from eligible_nodes import (
+    EligibleNodeFinder,
+    LandmarkIndex,
+    SettlementIndex,
+    landmark_candidate,
+)
 from elevation import Elevation, offset_elevation_profile
 from route_graph import RouteGraph
 from utils import haversine_distance_m, polyline_distance_m
@@ -396,6 +401,8 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
         self.landmarks = []  # candidate landmarks used only by relations without starts
         self.settlements = []  # settlement points used only by relations without starts
+        self.landmark_index = None
+        self.settlement_index = None
 
     def node(self, node):
         tags = node.tags
@@ -405,7 +412,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         if (
             node.id not in self.endpoint_maps_by_node
             and landmark is None
-            and settlement not in SETTLEMENT_WEIGHTS
+            and settlement is None
             and point_properties is None
         ):
             return
@@ -419,8 +426,8 @@ class GeoJSONExporter(osmium.SimpleHandler):
             landmark['node_id'] = node.id
             landmark['points'] = [point]
             self.landmarks.append(landmark)
-        if settlement in SETTLEMENT_WEIGHTS:
-            self.settlements.append({'place': settlement, 'point': point})
+        if settlement is not None:
+            self.settlements.append({'place': settlement, 'points': [point]})
         if point_properties is None:
             return
         write_feature(
@@ -645,6 +652,8 @@ def export_route_features(collector):
             endpoint_maps_by_node=endpoint_maps_by_node,
         )
         exporter.apply_file('tiles-filtered.osm.pbf', locations=True)
+        exporter.landmark_index = LandmarkIndex(exporter.landmarks)
+        exporter.settlement_index = SettlementIndex(exporter.settlements)
         snap_relation_endpoints(exporter)
         route_node_ids = {
             node_id
@@ -730,9 +739,9 @@ def write_route_lines(collector, exporter):
                         for way_id in route_relation['way_ids']
                         for node_id, _ in exporter.way_nodes.get(way_id, ())
                     },
-                    exporter.landmarks,
+                    exporter.landmark_index,
                     exporter.highway_type_by_way_id,
-                    getattr(exporter, 'settlements', ()),
+                    exporter.settlement_index,
                 )
                 route_graph = RouteGraph(
                     route_relation,

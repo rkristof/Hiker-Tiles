@@ -24,6 +24,7 @@ from eligible_nodes import (
     LANDMARK_IDENTITY_SCORE,
     LANDMARK_TEXT_SCORE,
     LandmarkIndex,
+    SettlementIndex,
     landmark_candidate,
 )
 
@@ -133,7 +134,8 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
-            landmarks=[],
+            landmark_index=None,
+            settlement_index=None,
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -206,7 +208,8 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
-            landmarks=[],
+            landmark_index=None,
+            settlement_index=None,
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -302,7 +305,7 @@ class RouteGraphTests(unittest.TestCase):
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
             landmark_index=None,
-            landmarks=[],
+            settlement_index=None,
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -376,7 +379,7 @@ class RouteGraphTests(unittest.TestCase):
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
             landmark_index=None,
-            landmarks=[],
+            settlement_index=None,
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -441,7 +444,7 @@ class RouteGraphTests(unittest.TestCase):
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
             landmark_index=None,
-            landmarks=[],
+            settlement_index=None,
         )
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -676,10 +679,10 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {1: {99}, 2: {99}},
             {1, 2},
-            [{
+            landmark_index=LandmarkIndex([{
                 'name': 'Gyadai tanosveny route entrance',
                 'points': [[0.0010, 0.0000]],
-            }],
+            }]),
         )
         self.assertEqual(finder.rank_eligible_nodes()[0], 2)
 
@@ -701,10 +704,10 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {1: {99}, 3: {99}},
             {1, 3},
-            [{
+            landmark_index=LandmarkIndex([{
                 'name': 'Branch route trailhead',
                 'points': [[-0.0010, 0.0000]],
-            }],
+            }]),
         )
         self.assertEqual(finder.rank_eligible_nodes()[0], 3)
 
@@ -777,6 +780,19 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(len(nearby), 1)
         self.assertIs(nearby[0][0], landmarks[0])
 
+    def test_landmark_index_returns_all_points(self):
+        landmark = {
+            'points': [
+                [0.0000, 0.0000],
+                [0.0010, 0.0000],
+            ],
+        }
+        index = LandmarkIndex([landmark])
+
+        nearby = list(index.nearby([0.0011, 0.0000]))
+
+        self.assertEqual(nearby, [(landmark, [0.0010, 0.0000])])
+
     def test_settlement_scores_use_type_weights_and_distance_cutoff(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
@@ -793,21 +809,33 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {},
             {1, 2, 3, 4, 5},
-            settlements=[
-                {'place': 'city', 'point': [0.0000, 0.0000]},
-                {'place': 'village', 'point': [0.0500, 0.0000]},
-                {'place': 'hamlet', 'point': [0.1000, 0.0000]},
-                {'place': 'isolated_dwelling', 'point': [0.1500, 0.0000]},
-            ],
+            settlement_index=SettlementIndex(
+                [
+                    {'place': 'city', 'points': [[0.0000, 0.0000]]},
+                    {'place': 'village', 'points': [[0.0500, 0.0000]]},
+                    {'place': 'hamlet', 'points': [[0.1000, 0.0000]]},
+                    {'place': 'town', 'points': [[0.1500, 0.0000]]},
+                ],
+            ),
         )
 
         scores = finder._settlement_scores()
 
         self.assertEqual(scores[1], 1)
-        self.assertEqual(scores[2], 0.85)
-        self.assertEqual(scores[3], 0.6)
-        self.assertEqual(scores[4], 0.3)
+        self.assertEqual(scores[2], 0.8)
+        self.assertEqual(scores[3], 0.4)
+        self.assertEqual(scores[4], 1)
         self.assertNotIn(5, scores)
+
+    def test_settlement_index_ignores_unsupported_place_values(self):
+        settlements = [
+            {'place': 'locality', 'points': [[0.0000, 0.0000]]},
+            {'place': 'town', 'points': [[0.0010, 0.0000]]},
+        ]
+
+        nearby = list(SettlementIndex(settlements).nearby([0.0000, 0.0000]))
+
+        self.assertEqual(nearby, [(settlements[1], [0.0010, 0.0000])])
 
     def test_settlement_nodes_are_collected(self):
         exporter = routes.GeoJSONExporter({}, io.StringIO(), collect_landmarks=True)
@@ -820,7 +848,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(
             exporter.settlements,
-            [{'place': 'town', 'point': [20.0, 48.0]}],
+            [{'place': 'town', 'points': [[20.0, 48.0]]}],
         )
 
     def test_landmark_distance_limit_is_enforced(self):
@@ -839,9 +867,9 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {1: {99}},
             {1},
-            [{
+            landmark_index=LandmarkIndex([{
                 'points': [[0.00128, 0.0000]],
-            }],
+            }]),
         )
 
         self.assertEqual(finder._landmark_nodes(), set())
@@ -862,7 +890,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {1: {99}, 2: {98}},
             {1, 2},
-            [
+            landmark_index=LandmarkIndex([
                 {
                     'node_id': 1,
                     'points': [[0.0000, 0.0000]],
@@ -872,8 +900,8 @@ class RouteGraphTests(unittest.TestCase):
                     'name': 'Blue Route entrance',
                     'points': [[0.0010, 0.0000]],
                 },
-            ],
-            {99: 'path', 98: 'path'},
+            ]),
+            highway_type_by_way_id={99: 'path', 98: 'path'},
         )
 
         landmark_scores = finder._landmark_scores()
@@ -900,23 +928,23 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {},
             {1, 2, 3},
-            [
+            landmark_index=LandmarkIndex([
                 {'points': [[0.0000, 0.0000]], 'name': '1. Geological trail'},
                 {'points': [[0.0010, 0.0000]], 'description': '3. Geological trail'},
                 {'points': [[0.0020, 0.0000]], 'name': '12. Geological trail'},
-            ],
+            ]),
         )
 
         self.assertEqual(
-            finder._landmark_score_multiplier(finder._landmarks[0]),
+            finder._landmark_score_multiplier(finder._landmark_index._items[0]),
             1,
         )
         self.assertEqual(
-            finder._landmark_score_multiplier(finder._landmarks[1]),
+            finder._landmark_score_multiplier(finder._landmark_index._items[1]),
             0.8,
         )
         self.assertEqual(
-            finder._landmark_score_multiplier(finder._landmarks[2]),
+            finder._landmark_score_multiplier(finder._landmark_index._items[2]),
             0.1,
         )
         self.assertEqual(
@@ -940,9 +968,9 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             {1: {99}, 4: {99}},
             {1, 4},
-            [{
+            landmark_index=LandmarkIndex([{
                 'points': [[0.0030, 0.0000]],
-            }],
+            }]),
         )
 
         self.assertEqual(finder.rank_eligible_nodes(), [4])
@@ -1312,7 +1340,8 @@ class RouteGraphTests(unittest.TestCase):
                         exporter = types.SimpleNamespace(
                             way_nodes=way_nodes,
                             highway_way_ids_by_node=highway_way_ids_by_node,
-                            landmarks=landmark_data or [],
+                            landmark_index=LandmarkIndex(landmark_data or []),
+                            settlement_index=None,
                         )
 
                         routes.write_route_lines(
