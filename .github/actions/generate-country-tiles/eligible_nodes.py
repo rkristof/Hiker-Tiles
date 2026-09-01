@@ -13,25 +13,15 @@ LANDMARK_RULES = (
 )
 LANDMARK_MAX_DISTANCE_M = 30
 LANDMARK_GRID_SIZE_DEGREES = 0.0005
-HIGHWAY_TYPE_SCORE = {
-    'path': 1,
-    'footway': 1,
-    'cycleway': 1,
-    'bridleway': 1,
-    'steps': 1,
-    'pedestrian': 1,
-    'track': 2,
-    'service': 3,
-    'road': 4,
-    'living_street': 5,
-    'residential': 6,
-    'unclassified': 7,
-    'tertiary': 8,
-    'secondary': 9,
-    'primary': 10,
-    'trunk': 11,
-    'motorway': 12,
-}
+HIGH_HIGHWAY_TYPES = frozenset((
+    'motorway',
+    'trunk',
+    'primary',
+    'secondary',
+    'tertiary',
+    'unclassified',
+    'residential',
+))
 
 
 def landmark_candidate(tags):
@@ -121,14 +111,20 @@ class EligibleNodeFinder:
 
     def externally_accessible_nodes(self):
         """Return candidate route nodes touched by an outside highway way."""
-        return {
+        eligible_nodes = {
             node_id
             for node_id in self._candidate_node_ids
+            if self._external_highway_way_ids(node_id)
+        }
+        high_nodes = {
+            node_id
+            for node_id in eligible_nodes
             if any(
-                way_id not in self._route_way_ids
-                for way_id in self._highway_way_ids_by_node.get(node_id, ())
+                self._highway_type_by_way_id.get(way_id) in HIGH_HIGHWAY_TYPES
+                for way_id in self._external_highway_way_ids(node_id)
             )
         }
+        return high_nodes or eligible_nodes
 
     def rank_eligible_nodes(self):
         """Return externally accessible nodes ordered by weighted start score."""
@@ -216,14 +212,14 @@ class EligibleNodeFinder:
         )
 
     def _external_access_score(self, node_id):
-        return sum(
-            HIGHWAY_TYPE_SCORE.get(
-                self._highway_type_by_way_id.get(way_id, 'path'),
-                1,
-            )
+        return len(self._external_highway_way_ids(node_id))
+
+    def _external_highway_way_ids(self, node_id):
+        return {
+            way_id
             for way_id in self._highway_way_ids_by_node.get(node_id, ())
             if way_id not in self._route_way_ids
-        )
+        }
 
     def _route_degree(self, node_id):
         neighbors = set()
