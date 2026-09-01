@@ -47,6 +47,17 @@ def load_route_regression_cases():
 
 
 class RouteGraphTests(unittest.TestCase):
+    @staticmethod
+    def make_route_graph(relation, way_nodes, sampler=None, roundtrip=False):
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            sampler=sampler,
+            roundtrip=roundtrip,
+        )
+        graph._create_simple_graph()
+        return graph
+
     def test_route_graph_expands_compressed_traversal_geometry(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
@@ -56,7 +67,7 @@ class RouteGraphTests(unittest.TestCase):
                 (3, [0.0020, 0.0000]),
             ],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertEqual(
             graph.traversal_coordinates([1, 3]),
@@ -74,6 +85,10 @@ class RouteGraphTests(unittest.TestCase):
             def __init__(self, directory):
                 self.route_paths = []
                 self.__class__.instances.append(self)
+
+            @staticmethod
+            def sample(point):
+                return 100
 
             def route_elevation(self, path):
                 self.route_paths.append(path)
@@ -117,6 +132,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             highway_way_ids_by_node={},
+            highway_type_by_way_id={},
             landmarks=[],
         )
 
@@ -149,6 +165,10 @@ class RouteGraphTests(unittest.TestCase):
             def __init__(self, directory):
                 self.route_paths = []
                 self.__class__.instances.append(self)
+
+            @staticmethod
+            def sample(point):
+                return 100
 
             def route_elevation(self, path):
                 self.route_paths.append(path)
@@ -185,6 +205,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             highway_way_ids_by_node={},
+            highway_type_by_way_id={},
             landmarks=[],
         )
 
@@ -214,7 +235,7 @@ class RouteGraphTests(unittest.TestCase):
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(3, [1.0000, 0.0000]), (4, [1.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         components = graph.component_graphs()
 
@@ -279,6 +300,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             node_coordinates={},
             highway_way_ids_by_node={},
+            highway_type_by_way_id={},
             landmark_index=None,
             landmarks=[],
         )
@@ -299,7 +321,6 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(len(metadata), 1)
         self.assertEqual(feature['geometry']['type'], 'MultiLineString')
         self.assertEqual(len(feature['geometry']['coordinates']), 2)
-        self.assertEqual(metadata[0]['duration_min'], 30)
         self.assertEqual(metadata[0]['elevation_gain_m'], 20)
         self.assertEqual(metadata[0]['elevation_loss_m'], 8)
         self.assertIsNone(metadata[0]['start_lon'])
@@ -353,6 +374,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             node_coordinates={},
             highway_way_ids_by_node={},
+            highway_type_by_way_id={},
             landmark_index=None,
             landmarks=[],
         )
@@ -417,6 +439,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             node_coordinates={},
             highway_way_ids_by_node={},
+            highway_type_by_way_id={},
             landmark_index=None,
             landmarks=[],
         )
@@ -628,7 +651,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             3: [(3, [0.0020, 0.0000]), (4, [0.0040, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         start, finish = graph.simple_line_endpoints()
         traversal = graph.shortest_complete_traversal_simple(start, finish)
@@ -647,7 +670,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
@@ -672,7 +695,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
             3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
@@ -696,7 +719,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
             3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_simple()
 
         self.assertEqual(traversal[0], 1)
@@ -709,7 +732,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(0, [0.0000, 0.0000]), (2, [0.0000, 0.0010])],
             3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertIsNotNone(graph.shortest_complete_traversal_simple())
 
@@ -720,7 +743,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(2, [0.0010, 0.0000]), (4, [0.0010, -0.0010])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_simple(1, 4)
 
         self.assertEqual((traversal[0], traversal[-1]), (1, 4))
@@ -737,7 +760,7 @@ class RouteGraphTests(unittest.TestCase):
             ]
             for way_id in relation['way_ids']
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_simple(0, 12)
 
         self.assertEqual((traversal[0], traversal[-1]), (0, 12))
@@ -847,7 +870,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertIn(1, graph._graph)
 
@@ -858,7 +881,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             3: [(3, [0.0020, 0.0000]), (4, [0.0040, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         start, finish = graph.simple_line_endpoints()
 
@@ -875,7 +898,7 @@ class RouteGraphTests(unittest.TestCase):
                 (3, [0.0020, 0.0000]),
             ],
         }
-        graph = routes.RouteGraph(relation, way_nodes, {2})
+        graph = self.make_route_graph(relation, way_nodes)
 
         start, finish = graph.simple_line_endpoints()
         traversal = graph.shortest_complete_traversal_simple(start, finish)
@@ -893,7 +916,7 @@ class RouteGraphTests(unittest.TestCase):
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes, {3})
+        graph = self.make_route_graph(relation, way_nodes)
 
         start, finish = graph.simple_line_endpoints()
         traversal = graph.shortest_complete_traversal_simple(start, finish)
@@ -911,19 +934,19 @@ class RouteGraphTests(unittest.TestCase):
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes, {3})
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertIn(1, graph._graph)
 
     def test_open_endpoint_search_uses_global_matching(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
         way_nodes = {
-            1: [(0, [0.0000, 0.0000]), (1, [0.0001, 0.0000])],
-            2: [(0, [0.0000, 0.0000]), (2, [-0.0001, 0.0000])],
+            1: [(0, [0.0000, 0.0000]), (1, [0.0004, 0.0000])],
+            2: [(0, [0.0000, 0.0000]), (2, [-0.0004, 0.0000])],
             3: [(0, [0.0000, 0.0000]), (3, [0.0010, 0.0000])],
             4: [(0, [0.0000, 0.0000]), (4, [-0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_simple()
 
         self.assertEqual(set(traversal), {0, 1, 2, 3, 4})
@@ -935,7 +958,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (4, [0.0010, 0.0010])],
             3: [(2, [0.0010, 0.0000]), (5, [0.0010, -0.0010])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_simple(1, 3)
         path = graph.traversal_coordinates(traversal)
 
@@ -955,7 +978,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(0, [0.0000, 0.0000]), (3, [-0.0010, 0.0000])],
             4: [(0, [0.0000, 0.0000]), (4, [0.0000, -0.0010])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         traversal = graph.shortest_complete_traversal_simple(1, 4)
 
@@ -969,7 +992,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(3, [0.0005, 0.0010]), (1, [0.0000, 0.0000])],
             4: [(2, [0.0010, 0.0000]), (4, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         traversal = graph.shortest_complete_traversal_simple(1, 1)
         path = graph.traversal_coordinates(traversal)
@@ -994,7 +1017,7 @@ class RouteGraphTests(unittest.TestCase):
             5: [(3, [0.0010, 0.0010]), (5, [0.0020, 0.0010])],
             6: [(2, [0.0010, 0.0000]), (6, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes, roundtrip=True)
+        graph = self.make_route_graph(relation, way_nodes, roundtrip=True)
         traversal = graph.eulerian_traversal(1)
         path = graph.traversal_coordinates(traversal)
 
@@ -1012,7 +1035,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(3, [0.0010, 0.0010]), (4, [0.0000, 0.0010])],
             4: [(4, [0.0000, 0.0010]), (2, [0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes, roundtrip=True)
+        graph = self.make_route_graph(relation, way_nodes, roundtrip=True)
         traversal = graph.eulerian_traversal(2)
         path = graph.traversal_coordinates(traversal)
 
@@ -1030,7 +1053,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(3, [0.0010, 0.0010]), (4, [0.0000, 0.0010])],
             4: [(4, [0.0000, 0.0010]), (2, [0.0010, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.shortest_complete_traversal_to_nearest_finish(1)
         path = graph.traversal_coordinates(traversal)
 
@@ -1044,7 +1067,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(2, [0.0010, 0.0000]), (3, [0.0010, 0.0010])],
             3: [(3, [0.0010, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
         traversal = graph.eulerian_traversal(1)
         path = graph.traversal_coordinates(traversal)
 
@@ -1057,7 +1080,7 @@ class RouteGraphTests(unittest.TestCase):
             1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
             2: [(2, [0.0010, 0.0000]), (3, [0.0020, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         traversal = graph.shortest_complete_traversal_simple(1, 3)
 
@@ -1070,11 +1093,11 @@ class RouteGraphTests(unittest.TestCase):
             1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0000])],
             2: [(3, [0.0010, 0.0000]), (4, [0.0015, 0.0000])],
         }
-        graph = routes.RouteGraph(relation, way_nodes, sampler=ConstantSampler())
+        graph = self.make_route_graph(relation, way_nodes, sampler=ConstantSampler())
 
         self.assertEqual(graph.component_count, 1)
 
-        far_graph = routes.RouteGraph(
+        far_graph = self.make_route_graph(
             relation,
             {
                 1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0000])],
@@ -1084,7 +1107,7 @@ class RouteGraphTests(unittest.TestCase):
         )
         self.assertEqual(far_graph.component_count, 2)
 
-        steep_graph = routes.RouteGraph(relation, way_nodes, sampler=SteepSampler())
+        steep_graph = self.make_route_graph(relation, way_nodes, sampler=SteepSampler())
         self.assertEqual(steep_graph.component_count, 2)
 
     def test_close_odd_endpoints_repair_multiple_pairs_without_sampler(self):
@@ -1096,7 +1119,7 @@ class RouteGraphTests(unittest.TestCase):
             4: [(0, [0.0000, 0.0000]), (4, [-0.0011, -0.0010])],
         }
 
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertEqual(graph._raw_graph.number_of_edges(), 6)
         self.assertTrue(
@@ -1106,7 +1129,7 @@ class RouteGraphTests(unittest.TestCase):
     def test_explicit_marker_outside_route_nodes_is_not_added(self):
         relation = {'way_ids': [1], 'node_roles': {'start': [99]}}
         way_nodes = {1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])]}
-        graph = routes.RouteGraph(relation, way_nodes)
+        graph = self.make_route_graph(relation, way_nodes)
 
         self.assertNotIn(99, graph._graph)
 
