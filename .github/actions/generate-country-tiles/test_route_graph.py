@@ -67,7 +67,6 @@ class RouteGraphTests(unittest.TestCase):
             sampler=sampler,
             roundtrip=roundtrip,
         )
-        graph._create_graph()
         return graph
 
     def test_route_graph_expands_compressed_traversal_geometry(self):

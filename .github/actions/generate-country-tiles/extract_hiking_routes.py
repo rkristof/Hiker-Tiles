@@ -686,7 +686,6 @@ def write_route_lines(collector, exporter):
         inferred_start_node=None,
     ):
         traversal = None
-        traversal_graph = route_graph._graph
         if start_node is not None and finish_node is not None:
             if start_node == finish_node:
                 traversal = route_graph.eulerian_traversal(start_node)
@@ -718,7 +717,7 @@ def write_route_lines(collector, exporter):
                     finish_node,
                 )
 
-        return traversal, traversal_graph
+        return traversal
 
     route_metadata = []
     route_feature_count = 0
@@ -766,14 +765,10 @@ def write_route_lines(collector, exporter):
                         way_segment_distances=exporter.way_segment_distances,
                         sampler=elevation,
                         roundtrip=roundtrip,
+                        inferred_start_node=inferred_start_node,
                     )
                     if not route_graph.has_edges:
                         continue
-                    route_graph._create_graph(
-                        (inferred_start_node,)
-                        if inferred_start_node is not None
-                        else ()
-                    )
                     component_results = []
                     for component_graph in route_graph.component_graphs():
                         component_start_node = (
@@ -791,7 +786,7 @@ def write_route_lines(collector, exporter):
                             if inferred_start_node in component_graph._graph
                             else None
                         )
-                        traversal, traversal_graph = component_traversal(
+                        traversal = component_traversal(
                             component_graph,
                             component_start_node,
                             component_finish_node,
@@ -800,16 +795,13 @@ def write_route_lines(collector, exporter):
                         if traversal is None:
                             component_results = None
                             break
-                        path = component_graph.traversal_coordinates(
-                            traversal,
-                            traversal_graph,
-                        )
+                        path = component_graph.traversal_coordinates(traversal)
                         if len(path) < 2:
                             component_results = None
                             break
                         component_results.append({
-                            'start_point': traversal_graph.nodes[traversal[0]]['point'],
-                            'finish_point': traversal_graph.nodes[traversal[-1]]['point'],
+                            'start_point': component_graph._graph.nodes[traversal[0]]['point'],
+                            'finish_point': component_graph._graph.nodes[traversal[-1]]['point'],
                             'path': path,
                             'distance_m': route_distance_m(path),
                         })

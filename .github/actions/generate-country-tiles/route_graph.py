@@ -13,6 +13,7 @@ class RouteGraph:
         way_segment_distances,
         sampler=None,
         roundtrip=False,
+        inferred_start_node=None,
     ):
         self._route_relation = route_relation
         self._roundtrip = roundtrip
@@ -52,11 +53,17 @@ class RouteGraph:
 
         if (
             not self._roundtrip
-            and self._raw_graph
-            and self._raw_graph.number_of_edges() > 0
+            and self.has_edges
             and nx.is_eulerian(self._raw_graph)
         ):
             self._roundtrip = True
+
+        if self.has_edges:
+            self._create_compressed_graph(
+                (inferred_start_node,)
+                if inferred_start_node is not None
+                else ()
+            )
 
     @property
     def has_edges(self):
@@ -90,11 +97,7 @@ class RouteGraph:
                 for node_id, order in self._relation_node_order.items()
                 if node_id in component
             }
-            raw_component = nx.node_connected_component(
-                self._raw_graph,
-                next(iter(component)),
-            )
-            component_graph._raw_graph = self._raw_graph.subgraph(raw_component)
+            component_graph._raw_graph = self._raw_graph.subgraph(component)
             component_graph._graph = self._graph.subgraph(component).copy()
             component_graphs.append(component_graph)
         return component_graphs
@@ -133,11 +136,11 @@ class RouteGraph:
     def point(self, node_id):
         return self._graph.nodes[node_id]['point']
 
-    def traversal_coordinates(self, traversal, graph=None):
+    def traversal_coordinates(self, traversal):
         """Return full route coordinates for a compressed node traversal."""
         if not traversal:
             return []
-        graph = self._graph if graph is None else graph
+        graph = self._graph
         if traversal[0] not in graph:
             return []
 
@@ -147,11 +150,10 @@ class RouteGraph:
             edge_data = graph.get_edge_data(first_node, second_node)
             if edge_data is None:
                 return []
-            if graph.is_multigraph():
-                edge_keys = tuple(edge_data)
-                edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
-                edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
-                used_edges[frozenset((first_node, second_node))] = edge_index + 1
+            edge_keys = tuple(edge_data)
+            edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
+            edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
+            used_edges[frozenset((first_node, second_node))] = edge_index + 1
             points = edge_data['points']
             if points[0] != graph.nodes[first_node]['point']:
                 points = list(reversed(points))
@@ -188,14 +190,11 @@ class RouteGraph:
         used_edges = {}
         for first_node, second_node in zip(traversal, traversal[1:]):
             edge_data = self._graph.get_edge_data(first_node, second_node)
-            if self._graph.is_multigraph():
-                edge_keys = tuple(edge_data)
-                edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
-                edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
-                used_edges[frozenset((first_node, second_node))] = edge_index + 1
-                distance += edge_data['weight']
-            else:
-                distance += edge_data['weight']
+            edge_keys = tuple(edge_data)
+            edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
+            edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
+            used_edges[frozenset((first_node, second_node))] = edge_index + 1
+            distance += edge_data['weight']
         return distance
 
     def shortest_complete_traversal(self, start_node=None, finish_node=None):
@@ -324,19 +323,9 @@ class RouteGraph:
             default=None,
         )
 
-    def _create_graph(self, additional_nodes=()):
-        self._graph = RouteGraph._create_compressed_graph(
-            self._raw_graph,
-            self._route_relation,
-            additional_nodes,
-        )
-        if self._roundtrip and self._graph and nx.is_connected(self._graph):
-            self._graph = self._eulerize_graph(self._graph)
-
-    @staticmethod
-    def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
+    def _create_compressed_graph(self, additional_nodes=()):
         # Compress topological edges; raw graph retains duplicate route members.
-        raw_graph = nx.MultiGraph(nx.Graph(raw_graph))
+        raw_graph = nx.MultiGraph(nx.Graph(self._raw_graph))
         retained_nodes = {
             node_id
             for node_id, degree in raw_graph.degree()
@@ -345,7 +334,7 @@ class RouteGraph:
         retained_nodes.update(
             node_id
             for role in ('start', 'end')
-            for node_id in route_relation.get('node_roles', {}).get(role, ())
+            for node_id in self._route_relation.get('node_roles', {}).get(role, ())
             if node_id in raw_graph
         )
         retained_nodes.update(
@@ -364,7 +353,7 @@ class RouteGraph:
 
         for start_node in retained_nodes:
             while raw_graph.degree(start_node):
-                first_node, current_node, edge_key, edge_data = next(
+                _, current_node, edge_key, edge_data = next(
                     iter(raw_graph.edges(start_node, keys=True, data=True)),
                 )
                 raw_graph.remove_edge(start_node, current_node, edge_key)
@@ -374,7 +363,7 @@ class RouteGraph:
                     edge_points.reverse()
 
                 while current_node not in retained_nodes:
-                    first_node, next_node, next_edge_key, next_edge_data = next(
+                    _, next_node, next_edge_key, next_edge_data = next(
                         iter(raw_graph.edges(current_node, keys=True, data=True)),
                     )
                     raw_graph.remove_edge(current_node, next_node, next_edge_key)
@@ -392,7 +381,9 @@ class RouteGraph:
                     points=edge_points,
                 )
 
-        return simple_graph
+        self._graph = simple_graph
+        if self._roundtrip and self._graph and nx.is_connected(self._graph):
+            self._graph = self._eulerize_graph(self._graph)
 
     @staticmethod
     def _eulerize_graph(graph):
@@ -408,9 +399,7 @@ class RouteGraph:
     @staticmethod
     def _minimum_edge_data(graph, first_node, second_node):
         edge_data = graph.get_edge_data(first_node, second_node)
-        if graph.is_multigraph():
-            return min(edge_data.values(), key=lambda data: data['weight'])
-        return edge_data
+        return min(edge_data.values(), key=lambda data: data['weight'])
 
     def _repair_disconnected_components(self, sampler):
         components = list(nx.connected_components(self._raw_graph))
