@@ -308,8 +308,8 @@ class EligibleNodeFinder:
 
     def _external_highways(self, node_id):
         return {
-            way_id: highway_type
-            for way_id, highway_type in self._connecting_highways_by_node.get(node_id, {}).items()
+            way_id: highway['highway_type']
+            for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items()
             if way_id not in self._route_way_ids
         }
 

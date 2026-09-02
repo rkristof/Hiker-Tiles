@@ -38,6 +38,13 @@ class ConstantSampler:
         return self.elevation
 
 
+def highway_data(highway_type, nodes):
+    return {
+        'highway_type': highway_type,
+        'nodes': nodes,
+    }
+
+
 class SteepSampler:
     def sample(self, point):
         return 100 if point[0] < 0.00075 else 120
@@ -60,11 +67,18 @@ def make_way_segment_distances(way_nodes):
 
 class RouteGraphTests(unittest.TestCase):
     @staticmethod
-    def make_route_graph(relation, way_nodes, sampler=None, roundtrip=False):
+    def make_route_graph(
+        relation,
+        way_nodes,
+        sampler=None,
+        roundtrip=False,
+        connecting_highways_by_node=None,
+    ):
         graph = routes.RouteGraph(
             relation,
             way_nodes,
             make_way_segment_distances(way_nodes),
+            connecting_highways_by_node=connecting_highways_by_node,
             sampler=sampler,
             roundtrip=roundtrip,
         )
@@ -600,6 +614,8 @@ class RouteGraphTests(unittest.TestCase):
         class Node:
             def __init__(self, node_id):
                 self.ref = node_id
+                self.lon = float(node_id)
+                self.lat = 0.0
 
         class Way:
             def __init__(self, way_id, highway_type, node_ids):
@@ -612,7 +628,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(
             collector.connecting_highways_by_node(),
-            {2: {20: 'residential'}},
+            {2: {20: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
         )
 
     def test_eligible_node_score_prefers_high_highway_nodes(self):
@@ -628,9 +644,15 @@ class RouteGraphTests(unittest.TestCase):
             relation,
             way_nodes,
             {
-                1: {10: 'path', 11: 'path'},
-                2: {12: 'motorway', 14: 'trunk'},
-                3: {13: 'residential'},
+                1: {
+                    10: highway_data('path', []),
+                    11: highway_data('path', []),
+                },
+                2: {
+                    12: highway_data('motorway', []),
+                    14: highway_data('trunk', []),
+                },
+                3: {13: highway_data('residential', [])},
             },
             {1, 2, 3},
         )
@@ -645,6 +667,8 @@ class RouteGraphTests(unittest.TestCase):
         class Node:
             def __init__(self, node_id):
                 self.ref = node_id
+                self.lon = float(node_id)
+                self.lat = 0.0
 
         class Way:
             def __init__(self, way_id, highway_type, node_ids):
@@ -659,7 +683,10 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(
             collector.connecting_highways_by_node(),
-            {1: {10: 'path'}, 4: {30: 'path'}},
+            {
+                1: {10: highway_data('path', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])},
+                4: {30: highway_data('path', [(4, [4.0, 0.0]), (5, [5.0, 0.0])])},
+            },
         )
 
     def test_inferred_simple_line_uses_ordered_leaves(self):
@@ -692,7 +719,10 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99: 'path'}, 2: {99: 'path'}},
+            {
+                1: {99: highway_data('path', [])},
+                2: {99: highway_data('path', [])},
+            },
             {1, 2},
             landmark_index=LandmarkIndex([{
                 'name': 'Gyadai tanosveny route entrance',
@@ -717,7 +747,10 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99: 'path'}, 3: {99: 'path'}},
+            {
+                1: {99: highway_data('path', [])},
+                3: {99: highway_data('path', [])},
+            },
             {1, 3},
             landmark_index=LandmarkIndex([{
                 'name': 'Branch route trailhead',
@@ -921,8 +954,8 @@ class RouteGraphTests(unittest.TestCase):
             relation,
             way_nodes,
             {
-                1: {99: 'path'},
-                2: {98: 'path'},
+                1: {99: highway_data('path', [])},
+                2: {98: highway_data('path', [])},
             },
             {1, 2},
             landmark_index=LandmarkIndex([
@@ -1001,8 +1034,8 @@ class RouteGraphTests(unittest.TestCase):
             relation,
             way_nodes,
             {
-                1: {99: 'path'},
-                4: {99: 'path'},
+                1: {99: highway_data('path', [])},
+                4: {99: highway_data('path', [])},
             },
             {1, 4},
             landmark_index=LandmarkIndex([{
@@ -1258,8 +1291,8 @@ class RouteGraphTests(unittest.TestCase):
     def test_repair_requires_both_distance_thresholds(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
         way_nodes = {
-            1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0000])],
-            2: [(3, [0.0010, 0.0000]), (4, [0.0015, 0.0000])],
+            1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0100])],
+            2: [(3, [0.0010, 0.0103]), (4, [0.0015, 0.0203])],
         }
         graph = self.make_route_graph(relation, way_nodes, sampler=ConstantSampler())
 
@@ -1268,8 +1301,8 @@ class RouteGraphTests(unittest.TestCase):
         far_graph = self.make_route_graph(
             relation,
             {
-                1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0000])],
-                2: [(3, [0.0020, 0.0000]), (4, [0.0025, 0.0000])],
+                1: [(1, [0.0000, 0.0000]), (2, [0.0005, 0.0100])],
+                2: [(3, [0.0020, 0.0200]), (4, [0.0025, 0.0300])],
             },
             sampler=ConstantSampler(),
         )
@@ -1278,7 +1311,102 @@ class RouteGraphTests(unittest.TestCase):
         steep_graph = self.make_route_graph(relation, way_nodes, sampler=SteepSampler())
         self.assertEqual(steep_graph.component_count, 2)
 
-    def test_close_odd_endpoints_repair_multiple_pairs_without_sampler(self):
+    def test_repairs_share_total_distance_budget(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0010, 0.0000])],
+        }
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+        )
+        graph._remaining_repair_distance = 10
+
+        def build_repair_edge(first_node, second_node, max_distance):
+            if max_distance < 6:
+                return None
+            return {
+                'weight': 6,
+                'points': [
+                    graph._raw_graph.nodes[first_node]['point'],
+                    graph._raw_graph.nodes[second_node]['point'],
+                ],
+            }
+
+        with patch.object(
+            routes.RouteGraph,
+            '_repair_edge',
+            side_effect=build_repair_edge,
+        ) as repair_edge:
+            self.assertTrue(
+                graph._repair_endpoint_pair(
+                    ConstantSampler(),
+                    1,
+                    2,
+                    100,
+                )
+            )
+            self.assertFalse(
+                graph._repair_endpoint_pair(
+                    ConstantSampler(),
+                    1,
+                    2,
+                    100,
+                )
+            )
+
+        self.assertEqual(repair_edge.call_count, 2)
+
+    def test_disconnected_repair_uses_highway_with_component_budget(self):
+        relation = {'way_ids': [1, 2], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0000, 0.0180])],
+            2: [(3, [0.0027, 0.0180]), (4, [0.0027, 0.0360])],
+        }
+        highway_nodes = [
+            (2, [0.0000, 0.0180]),
+            (5, [0.0022, 0.0180]),
+        ]
+
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+            connecting_highways_by_node={
+                2: {10: highway_data('path', highway_nodes)},
+            },
+        )
+
+        self.assertEqual(graph.component_count, 1)
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(2, 3).values()
+            if edge_data['points'][-1] == [0.0027, 0.0180]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0180],
+            [0.0022, 0.0180],
+            [0.0027, 0.0180],
+        ])
+
+    def test_disconnected_repair_uses_pair_component_distance(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0000, 0.0100])],
+            2: [(3, [0.00135, 0.0100]), (4, [0.00135, 0.0200])],
+            3: [(5, [1.0000, 0.0000]), (6, [1.0000, 0.1000])],
+        }
+
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+        )
+
+        self.assertEqual(graph.component_count, 3)
+
+    def test_near_closed_repair_multiple_endpoint_pairs(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
         way_nodes = {
             1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0010])],
@@ -1287,12 +1415,190 @@ class RouteGraphTests(unittest.TestCase):
             4: [(0, [0.0000, 0.0000]), (4, [-0.0011, -0.0010])],
         }
 
-        graph = self.make_route_graph(relation, way_nodes)
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+        )
 
         self.assertEqual(graph._raw_graph.number_of_edges(), 6)
         self.assertTrue(
             all(degree % 2 == 0 for _, degree in graph._raw_graph.degree())
         )
+
+    def test_near_closed_route_uses_straight_repair(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+
+        graph = self.make_route_graph(relation, way_nodes, sampler=ConstantSampler())
+
+        self.assertEqual(graph._raw_graph.degree(1), 2)
+        self.assertEqual(graph._raw_graph.degree(4), 2)
+        self.assertEqual(graph._raw_graph.number_of_edges(), 4)
+
+    def test_near_closed_route_extends_with_highway_before_straight_repair(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+        highway_nodes = [
+            (1, [0.0000, 0.0000]),
+            (5, [0.0030, 0.0000]),
+        ]
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', highway_nodes)},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0060, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0030, 0.0000],
+            [0.0060, 0.0000],
+        ])
+
+    def test_highway_repair_does_not_duplicate_opposite_endpoint(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+        highway_nodes = [
+            (1, [0.0000, 0.0000]),
+            (5, [0.0030, 0.0000]),
+            (4, [0.0060, 0.0000]),
+        ]
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', highway_nodes)},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0060, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0030, 0.0000],
+            [0.0060, 0.0000],
+        ])
+
+    def test_empty_highway_geometry_falls_back_to_straight_repair(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', [])},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0060, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0060, 0.0000],
+        ])
+
+    def test_near_closed_repair_requires_elevation_sampler(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+
+        graph = self.make_route_graph(relation, way_nodes)
+
+        self.assertEqual(graph._raw_graph.degree(1), 1)
+        self.assertEqual(graph._raw_graph.degree(4), 1)
+
+
+    def test_near_closed_route_discards_over_budget_highway_extension(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+        highway_nodes = [
+            (1, [0.0000, 0.0000]),
+            (5, [0.0200, 0.0100]),
+            (6, [0.0050, 0.0000]),
+        ]
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', highway_nodes)},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0060, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0060, 0.0000],
+        ])
 
     def test_explicit_marker_outside_route_nodes_is_not_added(self):
         relation = {'way_ids': [1], 'node_roles': {'start': [99]}}
@@ -1383,7 +1689,7 @@ class RouteGraphTests(unittest.TestCase):
                         }
                         external_nodes = set(case.get('externally_reachable_nodes', ()))
                         connecting_highways_by_node = {
-                            node_id: {-1: ''}
+                            node_id: {-1: highway_data('', [])}
                             for node_id in external_nodes
                         }
                         landmark_data = case.get('landmarks')

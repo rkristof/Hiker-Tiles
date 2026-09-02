@@ -300,16 +300,23 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
         if highway_type is None:
             return
 
+        try:
+            nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
+        except osmium.InvalidLocationError:
+            return
         connecting_node_ids = {
-            node.ref
-            for node in way.nodes
-            if node.ref in self.route_node_ids
+            node_id
+            for node_id, _ in nodes
+            if node_id in self.route_node_ids
         }
         if not connecting_node_ids:
             return
 
         for node_id in connecting_node_ids:
-            self._connecting_highways_by_node.setdefault(node_id, {})[way.id] = highway_type
+            self._connecting_highways_by_node.setdefault(node_id, {})[way.id] = {
+                'highway_type': highway_type,
+                'nodes': nodes,
+            }
 
     def connecting_highways_by_node(self):
         return self._connecting_highways_by_node
@@ -601,7 +608,7 @@ def export_route_features(collector):
             for node_id, _ in nodes
         }
         collector = ConnectingHighwayCollector(route_node_ids)
-        collector.apply_file('highways-filtered.osm.pbf')
+        collector.apply_file('highways-filtered.osm.pbf', locations=True)
         exporter.connecting_highways_by_node = collector.connecting_highways_by_node()
         print(f'Route ways matched: {exporter.way_count}')
         print(f'Natural points written: {exporter.point_count}')
@@ -694,6 +701,7 @@ def write_route_lines(collector, exporter):
                         route_relation,
                         exporter.way_nodes,
                         way_segment_distances=exporter.way_segment_distances,
+                        connecting_highways_by_node=exporter.connecting_highways_by_node,
                         sampler=elevation,
                         roundtrip=roundtrip,
                         inferred_start_node=inferred_start_node,

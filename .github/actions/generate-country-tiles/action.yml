@@ -82,9 +82,8 @@ runs:
         COUNTRY: ${{ inputs.country }}
         SYMBOL_TAG: ${{ inputs.symbol_tag }}
       run: |
-        # Keep route geometry and access highways in separate files. Highway
-        # node references are enough for access detection; their coordinates
-        # must not reach the route exporter.
+        # Keep route geometry and access highways in separate files. The route
+        # exporter retains geometry only for highways touching route nodes.
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
           n/checkpoint=hiking \
@@ -93,7 +92,7 @@ runs:
           n/place=city n/place=town n/place=village n/place=hamlet \
           n/natural=peak n/natural=cave_entrance n/natural=volcano \
           -o tiles-filtered.osm.pbf
-        osmium tags-filter -R tiles-latest.osm.pbf w/highway \
+        osmium tags-filter tiles-latest.osm.pbf w/highway \
           -o highways-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
         python3 .github/actions/generate-country-tiles/extract_hiking_routes.py

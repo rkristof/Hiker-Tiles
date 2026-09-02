@@ -11,12 +11,15 @@ class RouteGraph:
         route_relation,
         way_nodes,
         way_segment_distances,
+        connecting_highways_by_node=None,
         sampler=None,
         roundtrip=False,
         inferred_start_node=None,
     ):
         self._route_relation = route_relation
         self._roundtrip = roundtrip
+        self._route_way_ids = set(route_relation.get('way_ids', ()))
+        self._connecting_highways_by_node = connecting_highways_by_node or {}
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
 
@@ -48,8 +51,10 @@ class RouteGraph:
                     points=[first_point, second_point],
                 )
 
+        self._raw_route_distance = self._raw_graph.size(weight='weight')
+        self._remaining_repair_distance = self._raw_route_distance * 0.10
         self._repair_disconnected_components(sampler)
-        self._repair_close_odd_endpoints(sampler)
+        self._repair_near_closed_endpoints(sampler)
 
         if (
             not self._roundtrip
@@ -402,153 +407,258 @@ class RouteGraph:
         return min(edge_data.values(), key=lambda data: data['weight'])
 
     def _repair_disconnected_components(self, sampler):
-        components = list(nx.connected_components(self._raw_graph))
-        if sampler is None or len(components) < 2:
+        if sampler is None:
             return
 
-        component_by_node = {
-            node_id: component_index
-            for component_index, component in enumerate(components)
-            for node_id in component
-        }
-        self._repair_endpoint_pairs(sampler, 100, component_by_node)
+        while True:
+            components = list(nx.connected_components(self._raw_graph))
+            if len(components) < 2:
+                return
 
-    def _repair_close_odd_endpoints(self, sampler):
-        self._repair_endpoint_pairs(sampler, 30)
+            endpoints = self._degree_one_endpoints()
+            repaired = False
+            for first_index, first_component in enumerate(components):
+                first_endpoints = [
+                    node_id
+                    for node_id in endpoints
+                    if node_id in first_component
+                ]
+                first_distance = self._raw_graph.subgraph(first_component).size(
+                    weight='weight',
+                )
+                for second_component in components[first_index + 1:]:
+                    second_endpoints = [
+                        node_id
+                        for node_id in endpoints
+                        if node_id in second_component
+                    ]
+                    max_distance = (
+                        first_distance
+                        + self._raw_graph.subgraph(second_component).size(
+                            weight='weight',
+                        )
+                    ) * 0.10
+                    for first_node, second_node in self._ordered_endpoint_pairs(
+                        first_endpoints,
+                        second_endpoints,
+                    ):
+                        if self._repair_endpoint_pair(
+                            sampler,
+                            first_node,
+                            second_node,
+                            max_distance,
+                        ):
+                            repaired = True
+                            break
+                    if repaired:
+                        break
+                if repaired:
+                    break
+            if not repaired:
+                return
 
-    def _repair_endpoint_pairs(
-        self,
-        sampler,
-        max_distance,
-        component_by_node=None,
-    ):
-        endpoints = [
+    def _repair_near_closed_endpoints(self, sampler):
+        if sampler is None or self._raw_route_distance <= 0:
+            return
+
+        max_distance = self._raw_route_distance * 0.10
+        while True:
+            endpoints = self._degree_one_endpoints()
+            if len(endpoints) < 2:
+                return
+
+            repaired = False
+            for component in nx.connected_components(self._raw_graph):
+                component_endpoints = [
+                    node_id
+                    for node_id in endpoints
+                    if node_id in component
+                ]
+                for first_node, second_node in self._ordered_endpoint_pairs(
+                    component_endpoints,
+                ):
+                    if self._repair_endpoint_pair(
+                        sampler,
+                        first_node,
+                        second_node,
+                        max_distance,
+                    ):
+                        repaired = True
+                        break
+                if repaired:
+                    break
+            if not repaired:
+                return
+
+    def _ordered_endpoint_pairs(self, first_endpoints, second_endpoints=None):
+        if second_endpoints is None:
+            pairs = (
+                (first_node, second_node)
+                for first_index, first_node in enumerate(first_endpoints)
+                for second_node in first_endpoints[first_index + 1:]
+            )
+        else:
+            pairs = (
+                (first_node, second_node)
+                for first_node in first_endpoints
+                for second_node in second_endpoints
+            )
+        return sorted(
+            pairs,
+            key=lambda pair: haversine_distance_m(
+                self._raw_graph.nodes[pair[0]]['point'],
+                self._raw_graph.nodes[pair[1]]['point'],
+            ),
+        )
+
+    def _degree_one_endpoints(self):
+        return [
             node_id
             for node_id in self._raw_graph
             if self._raw_graph.degree(node_id) == 1
         ]
-        if len(endpoints) < 2:
-            return
 
-        elevations = None
-        if sampler is not None:
-            elevations = {
-                node_id: sampler.sample(self._raw_graph.nodes[node_id]['point'])
-                for node_id in endpoints
+    def _repair_endpoint_pair(
+        self,
+        sampler,
+        first_node,
+        second_node,
+        max_distance,
+    ):
+        max_distance = min(max_distance, self._remaining_repair_distance)
+        if max_distance <= 0:
+            return False
+
+        first_elevation = sampler.sample(self._raw_graph.nodes[first_node]['point'])
+        second_elevation = sampler.sample(self._raw_graph.nodes[second_node]['point'])
+        if (
+            first_elevation is None
+            or second_elevation is None
+            or abs(first_elevation - second_elevation) >= 15
+        ):
+            return False
+
+        edge_data = self._repair_edge(
+            first_node,
+            second_node,
+            max_distance,
+        )
+        if edge_data is None:
+            return False
+
+        self._raw_graph.add_edge(
+            first_node,
+            second_node,
+            **edge_data,
+        )
+        self._remaining_repair_distance -= edge_data['weight']
+        return True
+
+    def _repair_edge(self, first_node, second_node, max_distance):
+        initial_distance = haversine_distance_m(
+            self._raw_graph.nodes[first_node]['point'],
+            self._raw_graph.nodes[second_node]['point'],
+        )
+        first_extension = self._best_highway_extension(first_node, second_node)
+        second_extension = self._best_highway_extension(second_node, first_node)
+        first_point = (
+            first_extension['point']
+            if first_extension is not None
+            else self._raw_graph.nodes[first_node]['point']
+        )
+        if first_point == self._raw_graph.nodes[second_node]['point']:
+            second_extension = None
+        second_point = (
+            second_extension['point']
+            if second_extension is not None
+            else self._raw_graph.nodes[second_node]['point']
+        )
+        remaining_distance = haversine_distance_m(first_point, second_point)
+        extension_distance = sum(
+            extension['distance']
+            for extension in (first_extension, second_extension)
+            if extension is not None
+        )
+        if (
+            extension_distance + remaining_distance <= max_distance
+            and remaining_distance < max_distance * 0.5
+        ):
+            connection_points = []
+            if first_extension is not None:
+                connection_points.extend(first_extension['points'])
+            else:
+                connection_points.append(self._raw_graph.nodes[first_node]['point'])
+            if connection_points[-1] != second_point:
+                connection_points.append(second_point)
+            if second_extension is not None:
+                connection_points.extend(reversed(second_extension['points'][:-1]))
+            return {
+                'weight': extension_distance + remaining_distance,
+                'points': connection_points,
             }
 
-        candidates = {node_id: [] for node_id in endpoints}
-        for first_index, first_node in enumerate(endpoints):
-            if elevations is not None and elevations[first_node] is None:
-                continue
-            first_point = self._raw_graph.nodes[first_node]['point']
-            for second_node in endpoints[first_index + 1:]:
-                if (
-                    component_by_node is not None
-                    and self._same_component(
-                        component_by_node,
-                        first_node,
-                        second_node,
-                    )
-                ):
-                    continue
-                if elevations is not None and elevations[second_node] is None:
-                    continue
-                if (
-                    elevations is not None
-                    and abs(elevations[first_node] - elevations[second_node]) >= 15
-                ):
-                    continue
-                distance = haversine_distance_m(
-                    first_point,
-                    self._raw_graph.nodes[second_node]['point'],
-                )
-                if distance >= max_distance:
-                    continue
-                candidates[first_node].append((distance, second_node))
-                candidates[second_node].append((distance, first_node))
+        if initial_distance >= max_distance * 0.5:
+            return None
+        return {
+            'weight': initial_distance,
+            'points': [
+                self._raw_graph.nodes[first_node]['point'],
+                self._raw_graph.nodes[second_node]['point'],
+            ],
+        }
 
-        for node_candidates in candidates.values():
-            node_candidates.sort()
-
-        parent = (
-            list(range(len(set(component_by_node.values()))))
-            if component_by_node is not None
-            else None
+    def _best_highway_extension(self, node_id, other_node):
+        original_distance = haversine_distance_m(
+            self._raw_graph.nodes[node_id]['point'],
+            self._raw_graph.nodes[other_node]['point'],
         )
-
-        active_endpoints = set(endpoints)
-        while active_endpoints:
-            nearest = {}
-            for node_id in active_endpoints:
-                valid = [
-                    candidate
-                    for candidate in candidates[node_id]
-                    if candidate[1] in active_endpoints
-                    and (
-                        component_by_node is None
-                        or not self._same_component(
-                            component_by_node,
-                            node_id,
-                            candidate[1],
-                            parent,
-                        )
-                    )
-                ][:2]
-                if valid:
-                    nearest[node_id] = (
-                        valid[0],
-                        len(valid) == 1 or valid[1][0] - valid[0][0] >= 1e-6,
-                    )
-
-            mutual = [
-                (candidate[0][0], node_id, candidate[0][1])
-                for node_id, candidate in nearest.items()
-                if candidate[1]
-                and nearest.get(candidate[0][1], (None, False))[1]
-                and nearest[candidate[0][1]][0][1] == node_id
+        candidates = []
+        for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items():
+            if way_id in self._route_way_ids:
+                continue
+            nodes = highway['nodes']
+            if len(nodes) < 2:
+                continue
+            node_indexes = [
+                index
+                for index, (candidate_node_id, _) in enumerate(nodes)
+                if candidate_node_id == node_id
             ]
-            if not mutual:
-                return
-
-            distance, first_node, second_node = min(mutual)
-            self._raw_graph.add_edge(
-                first_node,
-                second_node,
-                weight=distance,
-                points=[
-                    self._raw_graph.nodes[first_node]['point'],
-                    self._raw_graph.nodes[second_node]['point'],
-                ],
-            )
-            if component_by_node is not None:
-                first_component = self._component_root(
-                    component_by_node[first_node],
-                    parent,
+            for node_index in node_indexes:
+                target_indexes = {0, len(nodes) - 1}
+                target_indexes.update(
+                    index
+                    for index, (candidate_node_id, _) in enumerate(nodes)
+                    if candidate_node_id == other_node
                 )
-                second_component = self._component_root(
-                    component_by_node[second_node],
-                    parent,
-                )
-                parent[second_component] = first_component
-            active_endpoints.remove(first_node)
-            active_endpoints.remove(second_node)
-
-    @staticmethod
-    def _component_root(component_index, parent):
-        while parent[component_index] != component_index:
-            parent[component_index] = parent[parent[component_index]]
-            component_index = parent[component_index]
-        return component_index
-
-    @staticmethod
-    def _same_component(component_by_node, first_node, second_node, parent=None):
-        if parent is None:
-            return component_by_node[first_node] == component_by_node[second_node]
-        return RouteGraph._component_root(
-            component_by_node[first_node],
-            parent,
-        ) == RouteGraph._component_root(
-            component_by_node[second_node],
-            parent,
+                for target_index in target_indexes:
+                    if target_index == node_index:
+                        continue
+                    step = 1 if target_index > node_index else -1
+                    path_nodes = nodes[node_index:target_index + step:step]
+                    if not path_nodes:
+                        continue
+                    extension_distance = sum(
+                        haversine_distance_m(first[1], second[1])
+                        for first, second in zip(path_nodes, path_nodes[1:])
+                    )
+                    remaining_distance = haversine_distance_m(
+                        path_nodes[-1][1],
+                        self._raw_graph.nodes[other_node]['point'],
+                    )
+                    if remaining_distance >= original_distance:
+                        continue
+                    candidates.append({
+                        'distance': extension_distance,
+                        'point': path_nodes[-1][1],
+                        'points': [point for _, point in path_nodes],
+                        'remaining_distance': remaining_distance,
+                    })
+        return min(
+            candidates,
+            key=lambda candidate: (
+                candidate['remaining_distance'],
+                candidate['distance'],
+            ),
+            default=None,
         )
