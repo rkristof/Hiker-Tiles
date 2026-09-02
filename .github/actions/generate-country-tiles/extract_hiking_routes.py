@@ -728,26 +728,8 @@ def write_route_lines(collector, exporter):
                 node_roles = route_relation.get('node_roles', {})
                 start_node = next(iter(node_roles.get('start', ())), None)
                 finish_node = next(iter(node_roles.get('end', ())), None)
-                inferred_start_node = None
                 roundtrip = route_relation.get('roundtrip', False)
-                if start_node is None:
-                    eligible_node_finder = EligibleNodeFinder(
-                        route_relation,
-                        exporter.way_nodes,
-                        exporter.highway_way_ids_by_node,
-                        {
-                            node_id
-                            for way_id in route_relation['way_ids']
-                            for node_id, _ in exporter.way_nodes.get(way_id, ())
-                        },
-                        exporter.landmark_index,
-                        exporter.highway_type_by_way_id,
-                        exporter.settlement_index,
-                    )
-                    inferred_start_node = next(
-                        iter(eligible_node_finder.rank_eligible_nodes()),
-                        None,
-                    )
+                
                 original_lines = [
                     [point for _, point in exporter.way_nodes.get(way_id, ())]
                     for way_id in route_relation['way_ids']
@@ -759,6 +741,25 @@ def write_route_lines(collector, exporter):
                 )
                 is_short_route = distance_m < MAX_TRAVERSAL_DISTANCE_M
                 if is_short_route:
+                    inferred_start_node = None
+                    if start_node is None:
+                        eligible_node_finder = EligibleNodeFinder(
+                            route_relation,
+                            exporter.way_nodes,
+                            exporter.highway_way_ids_by_node,
+                            {
+                                node_id
+                                for way_id in route_relation['way_ids']
+                                for node_id, _ in exporter.way_nodes.get(way_id, ())
+                            },
+                            exporter.landmark_index,
+                            exporter.highway_type_by_way_id,
+                            exporter.settlement_index,
+                        )
+                        inferred_start_node = next(
+                            iter(eligible_node_finder.rank_eligible_nodes()),
+                            None,
+                        )
                     route_graph = RouteGraph(
                         route_relation,
                         exporter.way_nodes,
