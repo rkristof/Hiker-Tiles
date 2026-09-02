@@ -368,12 +368,6 @@ class RouteGraph:
             default=None,
         )
 
-    def raw_route_distance_m(self):
-        return sum(
-            edge_data['weight']
-            for _, _, edge_data in self._raw_graph.edges(data=True)
-        )
-
     def _create_simple_graph(self):
         self._graph = RouteGraph._create_compressed_graph(
             self._raw_graph,

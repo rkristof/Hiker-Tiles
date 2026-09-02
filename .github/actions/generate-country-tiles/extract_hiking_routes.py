@@ -748,25 +748,26 @@ def write_route_lines(collector, exporter):
                     exporter.highway_type_by_way_id,
                     exporter.settlement_index,
                 )
-                route_graph = RouteGraph(
-                    route_relation,
-                    exporter.way_nodes,
-                    way_segment_distances=exporter.way_segment_distances,
-                    sampler=elevation,
-                    roundtrip=roundtrip,
-                )
-                if not route_graph.has_edges:
-                    continue
-
                 original_lines = [
                     [point for _, point in exporter.way_nodes.get(way_id, ())]
                     for way_id in route_relation['way_ids']
                 ]
 
-                distance_m = route_graph.raw_route_distance_m()
-                
+                distance_m = sum(
+                    sum(exporter.way_segment_distances[way_id])
+                    for way_id in route_relation['way_ids']
+                )
                 is_short_route = distance_m < MAX_TRAVERSAL_DISTANCE_M
                 if is_short_route:
+                    route_graph = RouteGraph(
+                        route_relation,
+                        exporter.way_nodes,
+                        way_segment_distances=exporter.way_segment_distances,
+                        sampler=elevation,
+                        roundtrip=roundtrip,
+                    )
+                    if not route_graph.has_edges:
+                        continue
                     route_graph._create_simple_graph()
                     component_results = []
                     for component_graph in route_graph.component_graphs():

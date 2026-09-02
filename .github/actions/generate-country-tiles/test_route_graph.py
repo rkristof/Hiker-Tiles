@@ -47,19 +47,23 @@ def load_route_regression_cases():
     return json.loads(fixture_path.read_text())
 
 
+def make_way_segment_distances(way_nodes):
+    return {
+        way_id: [
+            routes.haversine_distance_m(first_point, second_point)
+            for (_, first_point), (_, second_point) in zip(nodes, nodes[1:])
+        ]
+        for way_id, nodes in way_nodes.items()
+    }
+
+
 class RouteGraphTests(unittest.TestCase):
     @staticmethod
     def make_route_graph(relation, way_nodes, sampler=None, roundtrip=False):
         graph = routes.RouteGraph(
             relation,
             way_nodes,
-            {
-                way_id: [
-                    routes.haversine_distance_m(first_point, second_point)
-                    for (_, first_point), (_, second_point) in zip(nodes, nodes[1:])
-                ]
-                for way_id, nodes in way_nodes.items()
-            },
+            make_way_segment_distances(way_nodes),
             sampler=sampler,
             roundtrip=roundtrip,
         )
@@ -139,6 +143,7 @@ class RouteGraphTests(unittest.TestCase):
         collector = types.SimpleNamespace(relations={1: relation})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
+            way_segment_distances=make_way_segment_distances(way_nodes),
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
             landmark_index=None,
@@ -213,6 +218,7 @@ class RouteGraphTests(unittest.TestCase):
         collector = types.SimpleNamespace(relations={1: relation})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
+            way_segment_distances=make_way_segment_distances(way_nodes),
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
             landmark_index=None,
@@ -252,7 +258,10 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(len(components), 2)
         self.assertEqual([component.component_count for component in components], [1, 1])
         self.assertEqual(
-            [round(component.raw_route_distance_m()) for component in components],
+            [
+                round(sum(edge_data['weight'] for _, _, edge_data in component._raw_graph.edges(data=True)))
+                for component in components
+            ],
             [routes.route_distance_m([point for _, point in way_nodes[1]]),
              routes.route_distance_m([point for _, point in way_nodes[2]])],
         )
@@ -308,6 +317,7 @@ class RouteGraphTests(unittest.TestCase):
         collector = types.SimpleNamespace(relations={1: relation})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
+            way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
@@ -382,6 +392,7 @@ class RouteGraphTests(unittest.TestCase):
         collector = types.SimpleNamespace(relations={1: relation})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
+            way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
@@ -447,6 +458,7 @@ class RouteGraphTests(unittest.TestCase):
         collector = types.SimpleNamespace(relations={1: relation})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
+            way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             highway_way_ids_by_node={},
             highway_type_by_way_id={},
@@ -456,6 +468,7 @@ class RouteGraphTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, \
             patch.object(routes, 'Elevation', FakeElevation), \
+            patch.object(routes, 'RouteGraph', side_effect=AssertionError('long route must not build graph')), \
             patch.dict(os.environ, {'ELEVATION_DIRECTORY': directory}):
             previous_directory = os.getcwd()
             try:
@@ -1346,6 +1359,7 @@ class RouteGraphTests(unittest.TestCase):
                             landmark_data = [case['landmark']]
                         exporter = types.SimpleNamespace(
                             way_nodes=way_nodes,
+                            way_segment_distances=make_way_segment_distances(way_nodes),
                             highway_way_ids_by_node=highway_way_ids_by_node,
                             landmark_index=LandmarkIndex(landmark_data or []),
                             settlement_index=None,
