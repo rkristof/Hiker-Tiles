@@ -679,18 +679,20 @@ def export_route_features(collector):
 
 
 def write_route_lines(collector, exporter):
-    def component_traversal(route_graph, start_nodes, finish_nodes, eligible_node_finder):
+    def component_traversal(
+        route_graph,
+        start_node=None,
+        finish_node=None,
+        inferred_start_node=None,
+    ):
         traversal = None
         traversal_graph = route_graph._graph
-        if len(start_nodes) == 1 and len(finish_nodes) == 1:
-            start_node = start_nodes[0]
-            finish_node = finish_nodes[0]
+        if start_node is not None and finish_node is not None:
             if start_node == finish_node:
                 traversal = route_graph.eulerian_traversal(start_node)
             else:
-                traversal = route_graph.shortest_complete_traversal_simple(start_node, finish_node)
-        elif len(start_nodes) == 1 and not finish_nodes:
-            start_node = start_nodes[0]
+                traversal = route_graph.shortest_complete_traversal(start_node, finish_node)
+        elif start_node is not None:
             if route_graph._roundtrip:
                 traversal = route_graph.eulerian_traversal(start_node)
             else:
@@ -700,28 +702,21 @@ def write_route_lines(collector, exporter):
                 roundtrip_traversal = route_graph.eulerian_traversal(start_node)
                 if (
                     traversal is None
-                    or route_graph.traversal_distance_simple(roundtrip_traversal)
-                    < route_graph.traversal_distance_simple(traversal)
+                    or route_graph.traversal_distance(roundtrip_traversal)
+                    < route_graph.traversal_distance(traversal)
                 ):
                     traversal = roundtrip_traversal
         elif route_graph.is_simple_line():
             start_node, finish_node = route_graph.simple_line_endpoints()
-            traversal = route_graph.shortest_complete_traversal_simple(start_node, finish_node)
+            traversal = route_graph.shortest_complete_traversal(start_node, finish_node)
         else:
-            start_candidates = eligible_node_finder.rank_eligible_nodes()
-            start_node = start_candidates[0] if start_candidates else None
-            route_graph._create_complex_graph((start_node,) if start_node is not None else ())
             if route_graph.is_eulerian():
-                traversal = route_graph.complex_eulerian_traversal(start_node)
-                traversal_graph = route_graph._complex_graph
+                traversal = route_graph.eulerian_traversal(inferred_start_node)
             else:
-                traversal = (
-                    route_graph.shortest_complete_traversal_complex(start_node, None)
-                    if start_node is not None
-                    else None
+                traversal = route_graph.shortest_complete_traversal(
+                    inferred_start_node,
+                    finish_node,
                 )
-                if traversal is not None:
-                    traversal_graph = route_graph._complex_graph
 
         return traversal, traversal_graph
 
@@ -732,29 +727,35 @@ def write_route_lines(collector, exporter):
         with open('hiking-routes-interaction.geojsonseq', 'w') as route_lines_file:
             for relation_id, route_relation in collector.relations.items():
                 node_roles = route_relation.get('node_roles', {})
-                start_nodes = node_roles.get('start', ())
-                finish_nodes = node_roles.get('end', ())
+                start_node = next(iter(node_roles.get('start', ())), None)
+                finish_node = next(iter(node_roles.get('end', ())), None)
+                inferred_start_node = None
                 roundtrip = route_relation.get('roundtrip', False)
-                eligible_node_finder = EligibleNodeFinder(
-                    route_relation,
-                    exporter.way_nodes,
-                    exporter.highway_way_ids_by_node,
-                    {
-                        node_id
-                        for way_id in route_relation['way_ids']
-                        for node_id, _ in exporter.way_nodes.get(way_id, ())
-                    },
-                    exporter.landmark_index,
-                    exporter.highway_type_by_way_id,
-                    exporter.settlement_index,
-                )
+                if start_node is None:
+                    eligible_node_finder = EligibleNodeFinder(
+                        route_relation,
+                        exporter.way_nodes,
+                        exporter.highway_way_ids_by_node,
+                        {
+                            node_id
+                            for way_id in route_relation['way_ids']
+                            for node_id, _ in exporter.way_nodes.get(way_id, ())
+                        },
+                        exporter.landmark_index,
+                        exporter.highway_type_by_way_id,
+                        exporter.settlement_index,
+                    )
+                    inferred_start_node = next(
+                        iter(eligible_node_finder.rank_eligible_nodes()),
+                        None,
+                    )
                 original_lines = [
                     [point for _, point in exporter.way_nodes.get(way_id, ())]
                     for way_id in route_relation['way_ids']
                 ]
 
                 distance_m = sum(
-                    sum(exporter.way_segment_distances[way_id])
+                    sum(exporter.way_segment_distances.get(way_id, ()))
                     for way_id in route_relation['way_ids']
                 )
                 is_short_route = distance_m < MAX_TRAVERSAL_DISTANCE_M
@@ -768,20 +769,33 @@ def write_route_lines(collector, exporter):
                     )
                     if not route_graph.has_edges:
                         continue
-                    route_graph._create_simple_graph()
+                    route_graph._create_graph(
+                        (inferred_start_node,)
+                        if inferred_start_node is not None
+                        else ()
+                    )
                     component_results = []
                     for component_graph in route_graph.component_graphs():
-                        component_start_nodes = [
-                            node_id for node_id in start_nodes if node_id in component_graph._graph
-                        ]
-                        component_finish_nodes = [
-                            node_id for node_id in finish_nodes if node_id in component_graph._graph
-                        ]
+                        component_start_node = (
+                            start_node
+                            if start_node in component_graph._graph
+                            else None
+                        )
+                        component_finish_node = (
+                            finish_node
+                            if finish_node in component_graph._graph
+                            else None
+                        )
+                        component_inferred_start_node = (
+                            inferred_start_node
+                            if inferred_start_node in component_graph._graph
+                            else None
+                        )
                         traversal, traversal_graph = component_traversal(
                             component_graph,
-                            component_start_nodes,
-                            component_finish_nodes,
-                            eligible_node_finder,
+                            component_start_node,
+                            component_finish_node,
+                            component_inferred_start_node,
                         )
                         if traversal is None:
                             component_results = None

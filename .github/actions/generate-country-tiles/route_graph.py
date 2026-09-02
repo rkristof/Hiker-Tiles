@@ -18,7 +18,6 @@ class RouteGraph:
         self._roundtrip = roundtrip
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
-        self._complex_graph = None
 
         for node_id in route_relation.get('node_ids', ()):
             self._relation_node_order.setdefault(
@@ -97,7 +96,6 @@ class RouteGraph:
             )
             component_graph._raw_graph = self._raw_graph.subgraph(raw_component)
             component_graph._graph = self._graph.subgraph(component).copy()
-            component_graph._complex_graph = None
             component_graphs.append(component_graph)
         return component_graphs
 
@@ -160,28 +158,10 @@ class RouteGraph:
             coordinates.extend(points[1:])
         return coordinates
 
-    def complex_eulerian_traversal(self, start_node):
-        """Return an Eulerian traversal from an eligible or ordered graph node."""
-        graph = self._complex_graph
-        if not graph or not nx.is_connected(graph) or not nx.is_eulerian(graph):
-            return None
-
-        if start_node not in graph:
-            start_node = min(graph, key=self._relation_node_order.__getitem__)
-
-        return [
-            start_node,
-            *(
-                second_node
-                for _, second_node in nx.eulerian_circuit(
-                    graph,
-                    source=start_node,
-                )
-            ),
-        ]
-
     def eulerian_traversal(self, start_node):
         """Return a closed Eulerian or shortest complete traversal."""
+        if start_node is None:
+            start_node = next(iter(self._graph), None)
         if (
             start_node not in self._graph
             or not self._graph
@@ -189,7 +169,7 @@ class RouteGraph:
         ):
             return None
         if not nx.is_eulerian(self._graph):
-            return self.shortest_complete_traversal_simple(start_node, start_node)
+            return self.shortest_complete_traversal(start_node, start_node)
 
         return [
             start_node,
@@ -202,21 +182,13 @@ class RouteGraph:
             ),
         ]
 
-    def traversal_distance_simple(self, traversal):
-        """Return the weighted length of a traversal in the simple graph."""
-        return self._traversal_distance(traversal, self._graph)
-
-    def traversal_distance_complex(self, traversal):
-        """Return the weighted length of a traversal in the complex graph."""
-        return self._traversal_distance(traversal, self._complex_graph)
-
-    @staticmethod
-    def _traversal_distance(traversal, graph):
+    def traversal_distance(self, traversal):
+        """Return the weighted length of a traversal in the graph."""
         distance = 0
         used_edges = {}
         for first_node, second_node in zip(traversal, traversal[1:]):
-            edge_data = graph.get_edge_data(first_node, second_node)
-            if graph.is_multigraph():
+            edge_data = self._graph.get_edge_data(first_node, second_node)
+            if self._graph.is_multigraph():
                 edge_keys = tuple(edge_data)
                 edge_index = used_edges.get(frozenset((first_node, second_node)), 0)
                 edge_data = edge_data[edge_keys[min(edge_index, len(edge_keys) - 1)]]
@@ -226,39 +198,23 @@ class RouteGraph:
                 distance += edge_data['weight']
         return distance
 
-    def shortest_complete_traversal_simple(self, start_node=None, finish_node=None):
-        """Return the shortest complete traversal in the simple graph."""
+    def shortest_complete_traversal(self, start_node=None, finish_node=None):
+        """Return the shortest complete traversal in the graph."""
         if start_node is None and finish_node is None:
             return min(
                 (
-                    self._shortest_complete_traversal(
+                    self.shortest_complete_traversal(
                         start_node,
                         None,
-                        self._graph,
                     )
                     for start_node in self._graph
                 ),
-                key=self.traversal_distance_simple,
+                key=self.traversal_distance,
                 default=None,
             )
-        if start_node is None or finish_node is None:
+        if start_node is None:
             return None
-        return self._shortest_complete_traversal(
-            start_node,
-            finish_node,
-            self._graph,
-        )
-
-    def shortest_complete_traversal_complex(self, start_node, finish_node):
-        """Return the shortest complete traversal in the complex graph."""
-        return self._shortest_complete_traversal(
-            start_node,
-            finish_node,
-            self._complex_graph,
-        )
-
-    def _shortest_complete_traversal(self, start_node, finish_node, graph):
-        """Return a shortest weighted walk covering every graph edge."""
+        graph = self._graph
         if (
             start_node not in graph
             or (
@@ -329,7 +285,7 @@ class RouteGraph:
                     source=start_node,
                 )
             )
-            distance = self._traversal_distance(traversal, graph)
+            distance = self.traversal_distance(traversal)
             if distance < shortest_distance:
                 shortest_traversal = traversal
                 shortest_distance = distance
@@ -358,36 +314,24 @@ class RouteGraph:
                 traversal
                 for finish_node in finish_nodes
                 if (
-                    traversal := self.shortest_complete_traversal_simple(
+                    traversal := self.shortest_complete_traversal(
                         start_node,
                         finish_node,
                     )
                 )
             ),
-            key=self.traversal_distance_simple,
+            key=self.traversal_distance,
             default=None,
         )
 
-    def _create_simple_graph(self):
+    def _create_graph(self, additional_nodes=()):
         self._graph = RouteGraph._create_compressed_graph(
             self._raw_graph,
             self._route_relation,
+            additional_nodes,
         )
         if self._roundtrip and self._graph and nx.is_connected(self._graph):
             self._graph = self._eulerize_graph(self._graph)
-
-    def _create_complex_graph(self, eligible_nodes):
-        """Create a compressed graph that also retains eligible route nodes."""
-        eligible_nodes = tuple(
-            dict.fromkeys(node_id for node_id in eligible_nodes if node_id in self._raw_graph)
-        )
-        self._complex_graph = RouteGraph._create_compressed_graph(
-            self._raw_graph,
-            self._route_relation,
-            eligible_nodes,
-        )
-        if self._roundtrip and self._complex_graph and nx.is_connected(self._complex_graph):
-            self._complex_graph = self._eulerize_graph(self._complex_graph)
 
     @staticmethod
     def _create_compressed_graph(raw_graph, route_relation, additional_nodes=()):
