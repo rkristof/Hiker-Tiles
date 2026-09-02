@@ -16,7 +16,7 @@ LANDMARK_GRID_SIZE_DEGREES = 0.0005
 LANDMARK_TEXT_SCORE = 1
 LANDMARK_IDENTITY_SCORE = 0.5
 SETTLEMENT_MAX_DISTANCE_M = 5000
-SETTLEMENT_PROXIMITY_EXPONENT = 1.5
+SETTLEMENT_PROXIMITY_EXPONENT = 2
 SETTLEMENT_GRID_SIZE_DEGREES = 0.05
 SETTLEMENT_WEIGHTS = {
     'city': 1,
@@ -120,7 +120,7 @@ class SettlementIndex(SpatialIndex):
 
 
 class EligibleNodeFinder:
-    """Find and rank externally accessible route nodes."""
+    """Find and rank route nodes with directly connected highways."""
 
     MAX_RANKED_NODES = 1
 
@@ -128,20 +128,18 @@ class EligibleNodeFinder:
         self,
         route_relation,
         way_nodes,
-        highway_way_ids_by_node,
+        connecting_highways_by_node,
         candidate_node_ids,
         landmark_index=None,
-        highway_type_by_way_id=None,
         settlement_index=None,
     ):
         self._route_relation = route_relation
         self._way_nodes = way_nodes
-        self._highway_way_ids_by_node = highway_way_ids_by_node
+        self._connecting_highways_by_node = connecting_highways_by_node
         self._candidate_node_ids = set(candidate_node_ids)
         self._route_way_ids = set(route_relation.get('way_ids', ()))
         self._landmark_index = landmark_index
         self._settlement_index = settlement_index
-        self._highway_type_by_way_id = highway_type_by_way_id or {}
         self._relation_node_order = {}
 
         for node_id in route_relation.get('node_ids', ()):
@@ -161,7 +159,7 @@ class EligibleNodeFinder:
         eligible_nodes = {
             node_id
             for node_id in self._candidate_node_ids
-            if self._external_highway_way_ids(node_id)
+            if self._external_highways(node_id)
         }
         return eligible_nodes
 
@@ -293,26 +291,25 @@ class EligibleNodeFinder:
         )
 
     def _external_access_score(self, node_id):
-        external_way_ids = self._external_highway_way_ids(node_id)
+        external_highways = self._external_highways(node_id)
         access_score = sum(
             EXTERNAL_ACCESS_DECAY ** index
-            for index in range(len(external_way_ids))
+            for index in range(len(external_highways))
         )
-        high_way_ids = {
-            way_id
-            for way_id in external_way_ids
-            if self._highway_type_by_way_id.get(way_id) in HIGH_HIGHWAY_TYPES
-        }
+        high_highway_count = sum(
+            highway_type in HIGH_HIGHWAY_TYPES
+            for highway_type in external_highways.values()
+        )
         high_highway_score = HIGH_HIGHWAY_ACCESS_BONUS * sum(
             EXTERNAL_ACCESS_DECAY ** index
-            for index in range(len(high_way_ids))
+            for index in range(high_highway_count)
         )
         return access_score + high_highway_score
 
-    def _external_highway_way_ids(self, node_id):
+    def _external_highways(self, node_id):
         return {
-            way_id
-            for way_id in self._highway_way_ids_by_node.get(node_id, ())
+            way_id: highway_type
+            for way_id, highway_type in self._connecting_highways_by_node.get(node_id, {}).items()
             if way_id not in self._route_way_ids
         }
 

@@ -144,8 +144,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
-            highway_way_ids_by_node={},
-            highway_type_by_way_id={},
+            connecting_highways_by_node={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -219,8 +218,7 @@ class RouteGraphTests(unittest.TestCase):
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
-            highway_way_ids_by_node={},
-            highway_type_by_way_id={},
+            connecting_highways_by_node={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -320,8 +318,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
-            highway_way_ids_by_node={},
-            highway_type_by_way_id={},
+            connecting_highways_by_node={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -395,8 +392,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
-            highway_way_ids_by_node={},
-            highway_type_by_way_id={},
+            connecting_highways_by_node={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -461,8 +457,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
-            highway_way_ids_by_node={},
-            highway_type_by_way_id={},
+            connecting_highways_by_node={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -601,7 +596,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(exporter.landmarks, [])
 
-    def test_highway_access_collector_records_matching_route_nodes(self):
+    def test_connecting_highway_collector_records_matching_route_nodes(self):
         class Node:
             def __init__(self, node_id):
                 self.ref = node_id
@@ -612,11 +607,13 @@ class RouteGraphTests(unittest.TestCase):
                 self.tags = {'highway': highway_type}
                 self.nodes = [Node(node_id) for node_id in node_ids]
 
-        collector = routes.HighwayAccessCollector({2})
+        collector = routes.ConnectingHighwayCollector({2})
         collector.way(Way(20, 'residential', [1, 2]))
 
-        self.assertEqual(collector.accessible_highway_way_ids_by_node(), {2: {20}})
-        self.assertEqual(collector.highway_type_by_way_id(), {20: 'residential'})
+        self.assertEqual(
+            collector.connecting_highways_by_node(),
+            {2: {20: 'residential'}},
+        )
 
     def test_eligible_node_score_prefers_high_highway_nodes(self):
         relation = {'way_ids': [1], 'node_roles': {}}
@@ -630,15 +627,12 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {10, 11}, 2: {12, 14}, 3: {13}},
-            {1, 2, 3},
-            highway_type_by_way_id={
-                10: 'path',
-                11: 'path',
-                12: 'motorway',
-                14: 'trunk',
-                13: 'residential',
+            {
+                1: {10: 'path', 11: 'path'},
+                2: {12: 'motorway', 14: 'trunk'},
+                3: {13: 'residential'},
             },
+            {1, 2, 3},
         )
 
         self.assertEqual(finder.externally_accessible_nodes(), {1, 2, 3})
@@ -647,7 +641,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(finder._external_access_score(2), 3)
         self.assertGreater(finder._external_access_score(2), finder._external_access_score(1))
 
-    def test_highway_access_collector_connects_paths_to_access_highways(self):
+    def test_connecting_highway_collector_records_only_direct_connections(self):
         class Node:
             def __init__(self, node_id):
                 self.ref = node_id
@@ -658,14 +652,14 @@ class RouteGraphTests(unittest.TestCase):
                 self.tags = {'highway': highway_type}
                 self.nodes = [Node(node_id) for node_id in node_ids]
 
-        collector = routes.HighwayAccessCollector({1, 4})
+        collector = routes.ConnectingHighwayCollector({1, 4})
         collector.way(Way(10, 'path', [1, 2]))
         collector.way(Way(20, 'residential', [2, 3]))
         collector.way(Way(30, 'path', [4, 5]))
 
         self.assertEqual(
-            collector.accessible_highway_way_ids_by_node(),
-            {1: {10}},
+            collector.connecting_highways_by_node(),
+            {1: {10: 'path'}, 4: {30: 'path'}},
         )
 
     def test_inferred_simple_line_uses_ordered_leaves(self):
@@ -698,7 +692,7 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99}, 2: {99}},
+            {1: {99: 'path'}, 2: {99: 'path'}},
             {1, 2},
             landmark_index=LandmarkIndex([{
                 'name': 'Gyadai tanosveny route entrance',
@@ -723,7 +717,7 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99}, 3: {99}},
+            {1: {99: 'path'}, 3: {99: 'path'}},
             {1, 3},
             landmark_index=LandmarkIndex([{
                 'name': 'Branch route trailhead',
@@ -926,7 +920,10 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99}, 2: {98}},
+            {
+                1: {99: 'path'},
+                2: {98: 'path'},
+            },
             {1, 2},
             landmark_index=LandmarkIndex([
                 {
@@ -939,7 +936,6 @@ class RouteGraphTests(unittest.TestCase):
                     'points': [[0.0010, 0.0000]],
                 },
             ]),
-            highway_type_by_way_id={99: 'path', 98: 'path'},
         )
 
         landmark_scores = finder._landmark_scores()
@@ -1004,7 +1000,10 @@ class RouteGraphTests(unittest.TestCase):
         finder = routes.EligibleNodeFinder(
             relation,
             way_nodes,
-            {1: {99}, 4: {99}},
+            {
+                1: {99: 'path'},
+                4: {99: 'path'},
+            },
             {1, 4},
             landmark_index=LandmarkIndex([{
                 'points': [[0.0030, 0.0000]],
@@ -1383,8 +1382,8 @@ class RouteGraphTests(unittest.TestCase):
                             for node_id, _ in nodes
                         }
                         external_nodes = set(case.get('externally_reachable_nodes', ()))
-                        highway_way_ids_by_node = {
-                            node_id: {-1}
+                        connecting_highways_by_node = {
+                            node_id: {-1: ''}
                             for node_id in external_nodes
                         }
                         landmark_data = case.get('landmarks')
@@ -1393,8 +1392,7 @@ class RouteGraphTests(unittest.TestCase):
                         exporter = types.SimpleNamespace(
                             way_nodes=way_nodes,
                             way_segment_distances=make_way_segment_distances(way_nodes),
-                            highway_way_ids_by_node=highway_way_ids_by_node,
-                            highway_type_by_way_id={},
+                            connecting_highways_by_node=connecting_highways_by_node,
                             landmark_index=LandmarkIndex(landmark_data or []),
                             settlement_index=None,
                         )
