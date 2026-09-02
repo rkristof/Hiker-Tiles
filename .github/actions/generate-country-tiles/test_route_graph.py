@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -846,6 +847,23 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(scores[3], 0.4)
         self.assertEqual(scores[4], 1)
         self.assertNotIn(5, scores)
+
+    def test_settlement_scores_decay_more_quickly_with_distance(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        half_distance_degrees = math.degrees(5000 / (2 * 6371000))
+        finder = routes.EligibleNodeFinder(
+            relation,
+            {1: [(1, [half_distance_degrees, 0.0])]},
+            {},
+            {1},
+            settlement_index=SettlementIndex(
+                [{'place': 'village', 'points': [[0.0, 0.0]]}],
+            ),
+        )
+
+        score = finder._settlement_scores()[1]
+
+        self.assertAlmostEqual(score, 0.8 * 0.5 ** 1.5, places=3)
 
     def test_settlement_index_ignores_unsupported_place_values(self):
         settlements = [

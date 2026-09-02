@@ -16,6 +16,7 @@ LANDMARK_GRID_SIZE_DEGREES = 0.0005
 LANDMARK_TEXT_SCORE = 1
 LANDMARK_IDENTITY_SCORE = 0.5
 SETTLEMENT_MAX_DISTANCE_M = 5000
+SETTLEMENT_PROXIMITY_EXPONENT = 1.5
 SETTLEMENT_GRID_SIZE_DEGREES = 0.05
 SETTLEMENT_WEIGHTS = {
     'city': 1,
@@ -245,7 +246,7 @@ class EligibleNodeFinder:
                         0,
                         1 - distance / self._settlement_index.max_distance_m,
                     )
-                    score = SETTLEMENT_WEIGHTS[settlement['place']] * proximity
+                    score = SETTLEMENT_WEIGHTS[settlement['place']] * proximity ** SETTLEMENT_PROXIMITY_EXPONENT
                     if score:
                         scores[node_id] = max(scores.get(node_id, 0), score)
         return scores

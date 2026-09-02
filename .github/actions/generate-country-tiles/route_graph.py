@@ -261,7 +261,7 @@ class RouteGraph:
                     )
                     shortest_paths[first_node, second_node] = paths[second_node]
 
-            euler_graph = nx.MultiGraph(graph)
+            euler_graph = graph.copy()
             for first_node, second_node in nx.min_weight_matching(
                 matching_graph,
                 weight='weight',
