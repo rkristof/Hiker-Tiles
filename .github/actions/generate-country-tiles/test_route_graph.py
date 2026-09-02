@@ -857,7 +857,7 @@ class RouteGraphTests(unittest.TestCase):
 
         score = finder._settlement_scores()[1]
 
-        self.assertAlmostEqual(score, 0.8 * 0.5 ** 1.5, places=3)
+        self.assertAlmostEqual(score, 0.8 * 0.5 ** 2, places=3)
 
     def test_settlement_index_ignores_unsupported_place_values(self):
         settlements = [
@@ -983,7 +983,7 @@ class RouteGraphTests(unittest.TestCase):
         )
         self.assertEqual(
             finder._landmark_scores(),
-            {1: LANDMARK_TEXT_SCORE, 2: 24.0, 3: 3.0},
+            {1: LANDMARK_TEXT_SCORE, 2: 0.8, 3: 0.1},
         )
 
     def test_missing_endpoints_use_landmark_for_equal_endpoint_orientations(self):
