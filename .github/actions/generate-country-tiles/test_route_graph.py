@@ -53,6 +53,13 @@ class RouteGraphTests(unittest.TestCase):
         graph = routes.RouteGraph(
             relation,
             way_nodes,
+            {
+                way_id: [
+                    routes.haversine_distance_m(first_point, second_point)
+                    for (_, first_point), (_, second_point) in zip(nodes, nodes[1:])
+                ]
+                for way_id, nodes in way_nodes.items()
+            },
             sampler=sampler,
             roundtrip=roundtrip,
         )

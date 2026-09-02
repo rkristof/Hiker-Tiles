@@ -399,6 +399,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
         self.symbol_groups_buffer = []  # buffered (coordinates, route_properties, symbol_entries)
         self.way_groups_buffer = []  # buffered (coordinates, route_properties), merged after the pass
         self.way_nodes = {}  # way_id -> [(node_id, coordinates)] for route traversal
+        self.way_segment_distances = {}
         self.landmarks = []  # candidate landmarks used only by relations without starts
         self.settlements = []  # settlement points used only by relations without starts
         self.landmark_index = None
@@ -459,6 +460,10 @@ class GeoJSONExporter(osmium.SimpleHandler):
             return
         coordinates = [point for _, point in nodes]
         self.way_nodes[way.id] = nodes
+        self.way_segment_distances[way.id] = [
+            haversine_distance_m(first_point, second_point)
+            for (_, first_point), (_, second_point) in zip(nodes, nodes[1:])
+        ]
         # A way may belong to several relations. Use the highest-ranked network
         # for shared line properties and retain the most demanding difficulty.
         primary_route = min(route_attributes, key=lambda attributes: NETWORK_RANK[attributes['network']])
@@ -746,6 +751,7 @@ def write_route_lines(collector, exporter):
                 route_graph = RouteGraph(
                     route_relation,
                     exporter.way_nodes,
+                    way_segment_distances=exporter.way_segment_distances,
                     sampler=elevation,
                     roundtrip=roundtrip,
                 )

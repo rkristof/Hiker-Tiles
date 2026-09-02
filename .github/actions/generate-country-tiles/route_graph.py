@@ -10,6 +10,7 @@ class RouteGraph:
         self,
         route_relation,
         way_nodes,
+        way_segment_distances,
         sampler=None,
         roundtrip=False,
     ):
@@ -34,7 +35,8 @@ class RouteGraph:
                 self._relation_node_order.setdefault(node_id, len(self._relation_node_order))
                 self._raw_graph.add_node(node_id, point=point)
 
-            for first_node, second_node in zip(nodes, nodes[1:]):
+            segment_distances = way_segment_distances[way_id]
+            for segment_index, (first_node, second_node) in enumerate(zip(nodes, nodes[1:])):
                 first_node_id, first_point = first_node
                 second_node_id, second_point = second_node
                 if first_node_id == second_node_id:
@@ -42,7 +44,7 @@ class RouteGraph:
                 self._raw_graph.add_edge(
                     first_node_id,
                     second_node_id,
-                    weight=haversine_distance_m(first_point, second_point),
+                    weight=segment_distances[segment_index],
                     points=[first_point, second_point],
                 )
 
