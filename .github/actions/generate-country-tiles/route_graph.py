@@ -608,10 +608,6 @@ class RouteGraph:
         }
 
     def _best_highway_extension(self, node_id, other_node):
-        original_distance = haversine_distance_m(
-            self._raw_graph.nodes[node_id]['point'],
-            self._raw_graph.nodes[other_node]['point'],
-        )
         candidates = []
         for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items():
             if way_id in self._route_way_ids:
@@ -625,13 +621,7 @@ class RouteGraph:
                 if candidate_node_id == node_id
             ]
             for node_index in node_indexes:
-                target_indexes = {0, len(nodes) - 1}
-                target_indexes.update(
-                    index
-                    for index, (candidate_node_id, _) in enumerate(nodes)
-                    if candidate_node_id == other_node
-                )
-                for target_index in target_indexes:
+                for target_index in range(len(nodes)):
                     if target_index == node_index:
                         continue
                     step = 1 if target_index > node_index else -1
@@ -646,8 +636,6 @@ class RouteGraph:
                         path_nodes[-1][1],
                         self._raw_graph.nodes[other_node]['point'],
                     )
-                    if remaining_distance >= original_distance:
-                        continue
                     candidates.append({
                         'distance': extension_distance,
                         'point': path_nodes[-1][1],

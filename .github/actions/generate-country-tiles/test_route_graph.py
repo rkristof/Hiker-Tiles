@@ -1479,6 +1479,43 @@ class RouteGraphTests(unittest.TestCase):
             [0.0060, 0.0000],
         ])
 
+    def test_near_closed_route_can_stop_at_internal_highway_node(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0020, 0.0000]),
+            ],
+        }
+        highway_nodes = [
+            (1, [0.0000, 0.0000]),
+            (5, [0.0010, 0.0020]),
+            (6, [0.0200, 0.0100]),
+        ]
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', highway_nodes)},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0020, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0010, 0.0020],
+            [0.0020, 0.0000],
+        ])
+
     def test_highway_repair_does_not_duplicate_opposite_endpoint(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
