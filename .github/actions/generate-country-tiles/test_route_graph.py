@@ -45,6 +45,21 @@ def highway_data(highway_type, nodes):
     }
 
 
+def make_highway_index(highways_by_node):
+    unique_highways = {}
+    for highways in highways_by_node.values():
+        for way_id, highway in highways.items():
+            unique_highways[way_id] = highway
+    indexed_highways = {}
+    for way_id, highway in unique_highways.items():
+        for node_id, _ in highway['nodes']:
+            indexed_highways.setdefault(node_id, []).append((way_id, highway))
+    return {
+        node_id: tuple(highways)
+        for node_id, highways in indexed_highways.items()
+    }
+
+
 class SteepSampler:
     def sample(self, point):
         return 100 if point[0] < 0.00075 else 120
@@ -73,12 +88,14 @@ class RouteGraphTests(unittest.TestCase):
         sampler=None,
         roundtrip=False,
         connecting_highways_by_node=None,
+        highway_index=None,
     ):
         graph = routes.RouteGraph(
             relation,
             way_nodes,
             make_way_segment_distances(way_nodes),
             connecting_highways_by_node=connecting_highways_by_node,
+            highway_index=highway_index if highway_index is not None else {},
             sampler=sampler,
             roundtrip=roundtrip,
         )
@@ -159,6 +176,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             connecting_highways_by_node={},
+            highway_index={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -233,6 +251,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             connecting_highways_by_node={},
+            highway_index={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -333,6 +352,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
+            highway_index={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -407,6 +427,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
+            highway_index={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -472,6 +493,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
+            highway_index={},
             landmark_index=None,
             settlement_index=None,
         )
@@ -686,6 +708,43 @@ class RouteGraphTests(unittest.TestCase):
             {
                 1: {10: highway_data('path', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])},
                 4: {30: highway_data('path', [(4, [4.0, 0.0]), (5, [5.0, 0.0])])},
+            },
+        )
+
+    def test_connecting_highway_collector_indexes_adjacent_highways(self):
+        class Node:
+            def __init__(self, node_id):
+                self.ref = node_id
+                self.lon = float(node_id)
+                self.lat = 0.0
+
+        class Way:
+            def __init__(self, way_id, highway_type, node_ids):
+                self.id = way_id
+                self.tags = {'highway': highway_type}
+                self.nodes = [Node(node_id) for node_id in node_ids]
+
+        class TestCollector(routes.ConnectingHighwayCollector):
+            def apply_file(self, filename, locations=False):
+                self.way(Way(20, 'path', [2, 3]))
+
+        collector = TestCollector({1})
+        collector.way(Way(10, 'residential', [1, 2]))
+        collector.collect_adjacent_highways('unused.osm.pbf')
+
+        self.assertEqual(
+            collector.connecting_highways_by_node(),
+            {1: {10: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
+        )
+        self.assertEqual(
+            collector.highway_index(),
+            {
+                1: ((10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])),),
+                2: (
+                    (10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])),
+                    (20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])])),
+                ),
+                3: ((20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])])),),
             },
         )
 
@@ -937,7 +996,7 @@ class RouteGraphTests(unittest.TestCase):
             }]),
         )
 
-        self.assertEqual(finder._landmark_nodes(), set())
+        self.assertEqual(finder._landmark_scores(), {})
 
     def test_landmark_identity_counts_below_text_match(self):
         relation = {
@@ -1356,9 +1415,9 @@ class RouteGraphTests(unittest.TestCase):
 
         with patch.object(
             routes.RouteGraph,
-            '_repair_edge',
+            '_shortest_highway_path',
             side_effect=build_repair_edge,
-        ) as repair_edge:
+        ) as repair_path:
             self.assertTrue(
                 graph._repair_endpoint_pair(
                     ConstantSampler(),
@@ -1376,7 +1435,7 @@ class RouteGraphTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(repair_edge.call_count, 2)
+        self.assertEqual(repair_path.call_count, 2)
 
     def test_disconnected_repair_uses_highway_with_component_budget(self):
         relation = {'way_ids': [1, 2], 'node_roles': {}}
@@ -1387,6 +1446,7 @@ class RouteGraphTests(unittest.TestCase):
         highway_nodes = [
             (2, [0.0000, 0.0180]),
             (5, [0.0022, 0.0180]),
+            (3, [0.0027, 0.0180]),
         ]
 
         graph = self.make_route_graph(
@@ -1396,6 +1456,9 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 2: {10: highway_data('path', highway_nodes)},
             },
+            highway_index=make_highway_index({
+                2: {10: highway_data('path', highway_nodes)},
+            }),
         )
 
         self.assertEqual(graph.component_count, 1)
@@ -1486,7 +1549,16 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(graph._raw_graph.degree(4), 2)
         self.assertEqual(graph._raw_graph.number_of_edges(), 4)
 
-    def test_near_closed_route_extends_with_highway_before_straight_repair(self):
+    def test_near_closed_route_uses_adjacent_highway_chain(self):
+        class CountingHighwaysByNode(dict):
+            def __init__(self, highways_by_node):
+                super().__init__(make_highway_index(highways_by_node))
+                self.queries = []
+
+            def get(self, node_id, default=()):
+                self.queries.append(node_id)
+                return super().get(node_id, default)
+
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
             1: [
@@ -1496,19 +1568,45 @@ class RouteGraphTests(unittest.TestCase):
                 (4, [0.0060, 0.0000]),
             ],
         }
-        highway_nodes = [
-            (1, [0.0000, 0.0000]),
-            (5, [0.0030, 0.0000]),
-        ]
+        direct_highways = {
+            1: {
+                10: highway_data('primary', [
+                    (1, [0.0000, 0.0000]),
+                    (5, [0.0030, 0.0000]),
+                ]),
+            },
+            4: {
+                12: highway_data('track', [
+                    (6, [0.0040, 0.0010]),
+                    (4, [0.0060, 0.0000]),
+                ]),
+            },
+        }
+        repair_highways = {
+            1: direct_highways[1],
+            5: {
+                10: direct_highways[1][10],
+                11: highway_data('path', [
+                    (5, [0.0030, 0.0000]),
+                    (6, [0.0040, 0.0010]),
+                ]),
+            },
+            6: {
+                11: highway_data('path', [
+                    (5, [0.0030, 0.0000]),
+                    (6, [0.0040, 0.0010]),
+                ]),
+                12: direct_highways[4][12],
+            },
+            4: direct_highways[4],
+        }
 
-        graph = routes.RouteGraph(
+        graph = self.make_route_graph(
             relation,
             way_nodes,
-            make_way_segment_distances(way_nodes),
-            connecting_highways_by_node={
-                1: {10: highway_data('path', highway_nodes)},
-            },
             sampler=ConstantSampler(),
+            connecting_highways_by_node=direct_highways,
+            highway_index=CountingHighwaysByNode(repair_highways),
         )
 
         repair_edge = next(
@@ -1519,10 +1617,12 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(repair_edge['points'], [
             [0.0000, 0.0000],
             [0.0030, 0.0000],
+            [0.0040, 0.0010],
             [0.0060, 0.0000],
         ])
+        self.assertEqual(graph._highway_index.queries, [1, 5, 6])
 
-    def test_near_closed_route_extends_with_reverse_ordered_highway(self):
+    def test_near_closed_route_uses_reverse_highway_path(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
             1: [
@@ -1534,17 +1634,19 @@ class RouteGraphTests(unittest.TestCase):
         }
         highway_nodes = [
             (5, [0.0030, 0.0000]),
-            (1, [0.0000, 0.0000]),
+            (4, [0.0060, 0.0000]),
         ]
 
-        graph = routes.RouteGraph(
+        graph = self.make_route_graph(
             relation,
             way_nodes,
-            make_way_segment_distances(way_nodes),
-            connecting_highways_by_node={
-                1: {10: highway_data('path', highway_nodes)},
-            },
             sampler=ConstantSampler(),
+            connecting_highways_by_node={
+                4: {10: highway_data('path', highway_nodes)},
+            },
+            highway_index=make_highway_index({
+                4: {10: highway_data('path', highway_nodes)},
+            }),
         )
 
         repair_edge = next(
@@ -1571,7 +1673,7 @@ class RouteGraphTests(unittest.TestCase):
         highway_nodes = [
             (1, [0.0000, 0.0000]),
             (5, [0.0010, 0.0020]),
-            (6, [0.0200, 0.0100]),
+            (4, [0.0020, 0.0000]),
         ]
 
         graph = routes.RouteGraph(
@@ -1581,6 +1683,9 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 1: {10: highway_data('path', highway_nodes)},
             },
+            highway_index=make_highway_index({
+                1: {10: highway_data('path', highway_nodes)},
+            }),
             sampler=ConstantSampler(),
         )
 
@@ -1618,6 +1723,9 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 1: {10: highway_data('path', highway_nodes)},
             },
+            highway_index=make_highway_index({
+                1: {10: highway_data('path', highway_nodes)},
+            }),
             sampler=ConstantSampler(),
         )
 
@@ -1650,6 +1758,7 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 1: {10: highway_data('path', [])},
             },
+            highway_index={},
             sampler=ConstantSampler(),
         )
 
@@ -1703,6 +1812,9 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 1: {10: highway_data('path', highway_nodes)},
             },
+            highway_index=make_highway_index({
+                1: {10: highway_data('path', highway_nodes)},
+            }),
             sampler=ConstantSampler(),
         )
 
@@ -1815,6 +1927,7 @@ class RouteGraphTests(unittest.TestCase):
                             way_nodes=way_nodes,
                             way_segment_distances=make_way_segment_distances(way_nodes),
                             connecting_highways_by_node=connecting_highways_by_node,
+                            highway_index={},
                             landmark_index=LandmarkIndex(landmark_data or []),
                             settlement_index=None,
                         )

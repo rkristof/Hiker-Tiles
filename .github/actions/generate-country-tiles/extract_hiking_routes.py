@@ -292,8 +292,11 @@ class WayRouteCollector(osmium.SimpleHandler):
 class ConnectingHighwayCollector(osmium.SimpleHandler):
     def __init__(self, route_node_ids):
         super().__init__()
-        self.route_node_ids = set(route_node_ids)
-        self._connecting_highways_by_node = {}
+        self._route_node_ids = set(route_node_ids)
+        self._scan_node_ids = self._route_node_ids.copy()
+        self._direct_way_ids = {}
+        self._highways_by_id = {}
+        self._collecting_adjacent_highways = False
 
     def way(self, way):
         highway_type = way.tags.get('highway')
@@ -304,22 +307,48 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
             nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
         except osmium.InvalidLocationError:
             return
-        connecting_node_ids = {
-            node_id
-            for node_id, _ in nodes
-            if node_id in self.route_node_ids
-        }
-        if not connecting_node_ids:
+        if not any(node_id in self._scan_node_ids for node_id, _ in nodes):
             return
 
-        for node_id in connecting_node_ids:
-            self._connecting_highways_by_node.setdefault(node_id, {})[way.id] = {
-                'highway_type': highway_type,
-                'nodes': nodes,
-            }
+        highway = { 'highway_type': highway_type, 'nodes': nodes }
+        if self._collecting_adjacent_highways:
+            self._highways_by_id[way.id] = highway
+        else:
+            self._direct_way_ids[way.id] = None
+            self._highways_by_id[way.id] = highway
+
+    def collect_adjacent_highways(self, filename):
+        direct_node_ids = {
+            node_id
+            for way_id in self._direct_way_ids
+            for node_id, _ in self._highways_by_id[way_id]['nodes']
+        }
+        self._scan_node_ids = direct_node_ids
+        self._collecting_adjacent_highways = True
+        try:
+            self.apply_file(filename, locations=True)
+        finally:
+            self._collecting_adjacent_highways = False
+            self._scan_node_ids = set()
 
     def connecting_highways_by_node(self):
-        return self._connecting_highways_by_node
+        highways_by_node = {}
+        for way_id in self._direct_way_ids:
+            highway = self._highways_by_id[way_id]
+            for node_id, _ in highway['nodes']:
+                if node_id in self._route_node_ids:
+                    highways_by_node.setdefault(node_id, {})[way_id] = highway
+        return highways_by_node
+
+    def highway_index(self):
+        highways_by_node = {}
+        for way_id, highway in self._highways_by_id.items():
+            for node_id, _ in highway['nodes']:
+                highways_by_node.setdefault(node_id, []).append((way_id, highway))
+        return {
+            node_id: tuple(highways)
+            for node_id, highways in highways_by_node.items()
+        }
 
 
 class GeoJSONExporter(osmium.SimpleHandler):
@@ -609,7 +638,9 @@ def export_route_features(collector):
         }
         collector = ConnectingHighwayCollector(route_node_ids)
         collector.apply_file('highways-filtered.osm.pbf', locations=True)
+        collector.collect_adjacent_highways('highways-filtered.osm.pbf')
         exporter.connecting_highways_by_node = collector.connecting_highways_by_node()
+        exporter.highway_index = collector.highway_index()
         print(f'Route ways matched: {exporter.way_count}')
         print(f'Natural points written: {exporter.point_count}')
     write_route_layers(exporter)
@@ -702,6 +733,7 @@ def write_route_lines(collector, exporter):
                         exporter.way_nodes,
                         way_segment_distances=exporter.way_segment_distances,
                         connecting_highways_by_node=exporter.connecting_highways_by_node,
+                        highway_index=exporter.highway_index,
                         sampler=elevation,
                         roundtrip=roundtrip,
                         inferred_start_node=inferred_start_node,

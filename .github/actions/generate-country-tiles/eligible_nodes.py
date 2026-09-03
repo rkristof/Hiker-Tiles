@@ -229,9 +229,6 @@ class EligibleNodeFinder:
                 return max(0.1, 1 - (int(match.group(1)) - 1) * 0.1)
         return 1
 
-    def _landmark_nodes(self):
-        return set(self._landmark_scores())
-
     def _settlement_scores(self, node_ids=None):
         if self._settlement_index is None:
             return {}

@@ -1,3 +1,5 @@
+import heapq
+
 import networkx as nx
 
 from utils import haversine_distance_m
@@ -11,6 +13,7 @@ class RouteGraph:
         route_relation,
         way_nodes,
         way_segment_distances,
+        highway_index,
         connecting_highways_by_node=None,
         sampler=None,
         roundtrip=False,
@@ -20,6 +23,7 @@ class RouteGraph:
         self._roundtrip = roundtrip
         self._route_way_ids = set(route_relation.get('way_ids', ()))
         self._connecting_highways_by_node = connecting_highways_by_node or {}
+        self._highway_index = highway_index
         self._relation_node_order = {}
         self._raw_graph = nx.MultiGraph()
 
@@ -474,6 +478,14 @@ class RouteGraph:
                     way_id not in self._route_way_ids
                     for way_id in self._connecting_highways_by_node.get(node_id, {})
                 )
+                and (
+                    self._raw_graph.degree(node_id) <= 2
+                    or not any(
+                        highway.get('nodes')
+                        for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items()
+                        if way_id not in self._route_way_ids
+                    )
+                )
             )
             if not first_endpoints or len(second_endpoints) < 2:
                 return
@@ -574,7 +586,7 @@ class RouteGraph:
         ):
             return False
 
-        edge_data = self._repair_edge(
+        edge_data = self._shortest_highway_path(
             first_node,
             second_node,
             max_distance,
@@ -590,102 +602,88 @@ class RouteGraph:
         self._remaining_repair_distance -= edge_data['weight']
         return True
 
-    def _repair_edge(self, first_node, second_node, max_distance):
-        initial_distance = haversine_distance_m(
-            self._raw_graph.nodes[first_node]['point'],
-            self._raw_graph.nodes[second_node]['point'],
-        )
-        first_extension = self._best_highway_extension(first_node, second_node)
-        second_extension = self._best_highway_extension(second_node, first_node)
-        first_point = (
-            first_extension['point']
-            if first_extension is not None
-            else self._raw_graph.nodes[first_node]['point']
-        )
-        if first_point == self._raw_graph.nodes[second_node]['point']:
-            second_extension = None
-        second_point = (
-            second_extension['point']
-            if second_extension is not None
-            else self._raw_graph.nodes[second_node]['point']
-        )
-        remaining_distance = haversine_distance_m(first_point, second_point)
-        extension_distance = sum(
-            extension['distance']
-            for extension in (first_extension, second_extension)
-            if extension is not None
-        )
-        if (
-            extension_distance + remaining_distance <= max_distance
-            and remaining_distance < max_distance * 0.5
-        ):
-            connection_points = []
-            if first_extension is not None:
-                connection_points.extend(first_extension['points'])
-            else:
-                connection_points.append(self._raw_graph.nodes[first_node]['point'])
-            if connection_points[-1] != second_point:
-                connection_points.append(second_point)
-            if second_extension is not None:
-                connection_points.extend(reversed(second_extension['points'][:-1]))
+    def _shortest_highway_path(self, first_node, second_node, max_distance):
+        first_point = self._raw_graph.nodes[first_node]['point']
+        second_point = self._raw_graph.nodes[second_node]['point']
+        initial_distance = haversine_distance_m(first_point, second_point)
+        distances = {first_node: 0}
+        predecessors = {}
+        queue = [(0, first_node)]
+        if first_node not in self._highway_index:
+            for node_id, highway_nodes in self._highway_index.items():
+                if node_id in self._raw_graph:
+                    continue
+                point = next(
+                    point
+                    for _, highway in highway_nodes
+                    for candidate_node_id, point in highway['nodes']
+                    if candidate_node_id == node_id
+                )
+                distance = haversine_distance_m(first_point, point)
+                if distance <= max_distance:
+                    distances[node_id] = distance
+                    predecessors[node_id] = (first_node, [first_point, point])
+                    heapq.heappush(queue, (distance, node_id))
+
+        while queue:
+            distance, current_node = heapq.heappop(queue)
+            if distance != distances[current_node]:
+                continue
+            if current_node == second_node:
+                break
+            for way_id, highway in self._highway_index.get(current_node, ()):
+                if way_id in self._route_way_ids:
+                    continue
+                for node_index, (node_id, _) in enumerate(highway['nodes']):
+                    if node_id != current_node:
+                        continue
+                    for target_index in (node_index - 1, node_index + 1):
+                        if not 0 <= target_index < len(highway['nodes']):
+                            continue
+                        target = highway['nodes'][target_index]
+                        path_nodes = [
+                            highway['nodes'][node_index],
+                            target,
+                        ]
+                        extension_distance = sum(
+                            haversine_distance_m(first[1], second[1])
+                            for first, second in zip(path_nodes, path_nodes[1:])
+                        )
+                        target_node = target[0]
+                        target_distance = distance + extension_distance
+                        if target_distance > max_distance:
+                            continue
+                        if target_distance >= distances.get(target_node, float('inf')):
+                            continue
+                        distances[target_node] = target_distance
+                        predecessors[target_node] = (
+                            current_node,
+                            [point for _, point in path_nodes],
+                        )
+                        heapq.heappush(queue, (target_distance, target_node))
+
+        if second_node not in distances:
+            if initial_distance >= max_distance * 0.5:
+                return None
             return {
-                'weight': extension_distance + remaining_distance,
-                'points': connection_points,
+                'weight': initial_distance,
+                'points': [first_point, second_point],
             }
 
-        if initial_distance >= max_distance * 0.5:
-            return None
-        return {
-            'weight': initial_distance,
-            'points': [
-                self._raw_graph.nodes[first_node]['point'],
-                self._raw_graph.nodes[second_node]['point'],
-            ],
-        }
+        connection_points = []
+        path_segments = []
+        current_node = second_node
+        while current_node != first_node:
+            previous_node, edge_points = predecessors[current_node]
+            path_segments.append(edge_points)
+            current_node = previous_node
+        for edge_points in reversed(path_segments):
+            if connection_points:
+                connection_points.extend(edge_points[1:])
+            else:
+                connection_points.extend(edge_points)
 
-    def _best_highway_extension(self, node_id, other_node):
-        candidates = []
-        for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items():
-            if way_id in self._route_way_ids:
-                continue
-            nodes = highway['nodes']
-            if len(nodes) < 2:
-                continue
-            node_indexes = [
-                index
-                for index, (candidate_node_id, _) in enumerate(nodes)
-                if candidate_node_id == node_id
-            ]
-            for node_index in node_indexes:
-                for target_index in range(len(nodes)):
-                    if target_index == node_index:
-                        continue
-                    step = 1 if target_index > node_index else -1
-                    path_nodes = [
-                        nodes[index]
-                        for index in range(node_index, target_index + step, step)
-                    ]
-                    if not path_nodes:
-                        continue
-                    extension_distance = sum(
-                        haversine_distance_m(first[1], second[1])
-                        for first, second in zip(path_nodes, path_nodes[1:])
-                    )
-                    remaining_distance = haversine_distance_m(
-                        path_nodes[-1][1],
-                        self._raw_graph.nodes[other_node]['point'],
-                    )
-                    candidates.append({
-                        'distance': extension_distance,
-                        'point': path_nodes[-1][1],
-                        'points': [point for _, point in path_nodes],
-                        'remaining_distance': remaining_distance,
-                    })
-        return min(
-            candidates,
-            key=lambda candidate: (
-                candidate['remaining_distance'],
-                candidate['distance'],
-            ),
-            default=None,
-        )
+        return {
+            'weight': distances[second_node],
+            'points': connection_points,
+        }
