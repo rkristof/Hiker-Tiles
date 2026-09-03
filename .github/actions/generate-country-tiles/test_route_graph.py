@@ -1228,6 +1228,26 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual((traversal[0], traversal[-1]), (2, 2))
         self.assertEqual(path[-1], graph.point(2))
 
+    def test_roundtrip_repair_uses_raw_endpoint_degrees(self):
+        relation = {
+            'way_ids': [1, 1, 2],
+            'node_roles': {},
+        }
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0500, 0.0000])],
+            2: [(2, [0.0500, 0.0000]), (3, [0.0010, 0.0000])],
+        }
+
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+            roundtrip=True,
+        )
+
+        self.assertIsNone(graph._raw_graph.get_edge_data(1, 3))
+        self.assertTrue(graph.is_eulerian())
+
     def test_explicit_start_on_branch_uses_free_finish(self):
         relation = {
             'way_ids': [1, 2, 3, 4],
@@ -1406,7 +1426,7 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(graph.component_count, 3)
 
-    def test_near_closed_repair_multiple_endpoint_pairs(self):
+    def test_near_closed_repair_rejects_short_graph_distance(self):
         relation = {'way_ids': [1, 2, 3, 4], 'node_roles': {}}
         way_nodes = {
             1: [(0, [0.0000, 0.0000]), (1, [0.0010, 0.0010])],
@@ -1421,10 +1441,33 @@ class RouteGraphTests(unittest.TestCase):
             sampler=ConstantSampler(),
         )
 
-        self.assertEqual(graph._raw_graph.number_of_edges(), 6)
+        self.assertEqual(graph._raw_graph.number_of_edges(), 4)
         self.assertTrue(
-            all(degree % 2 == 0 for _, degree in graph._raw_graph.degree())
+            any(degree % 2 for _, degree in graph._raw_graph.degree())
         )
+
+    def test_near_closed_repair_considers_external_internal_node(self):
+        relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
+        way_nodes = {
+            1: [(1, [0.0000, 0.0000]), (2, [0.0000, 0.0400])],
+            2: [(2, [0.0000, 0.0400]), (3, [0.0400, 0.0400])],
+            3: [
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+                (5, [0.0060, 0.0200]),
+            ],
+        }
+
+        graph = self.make_route_graph(
+            relation,
+            way_nodes,
+            sampler=ConstantSampler(),
+            connecting_highways_by_node={
+                4: {10: highway_data('path', [])},
+            },
+        )
+
+        self.assertIsNotNone(graph._raw_graph.get_edge_data(1, 4))
 
     def test_near_closed_route_uses_straight_repair(self):
         relation = {'way_ids': [1], 'node_roles': {}}
@@ -1456,6 +1499,42 @@ class RouteGraphTests(unittest.TestCase):
         highway_nodes = [
             (1, [0.0000, 0.0000]),
             (5, [0.0030, 0.0000]),
+        ]
+
+        graph = routes.RouteGraph(
+            relation,
+            way_nodes,
+            make_way_segment_distances(way_nodes),
+            connecting_highways_by_node={
+                1: {10: highway_data('path', highway_nodes)},
+            },
+            sampler=ConstantSampler(),
+        )
+
+        repair_edge = next(
+            edge_data
+            for edge_data in graph._raw_graph.get_edge_data(1, 4).values()
+            if edge_data['points'][-1] == [0.0060, 0.0000]
+        )
+        self.assertEqual(repair_edge['points'], [
+            [0.0000, 0.0000],
+            [0.0030, 0.0000],
+            [0.0060, 0.0000],
+        ])
+
+    def test_near_closed_route_extends_with_reverse_ordered_highway(self):
+        relation = {'way_ids': [1], 'node_roles': {}}
+        way_nodes = {
+            1: [
+                (1, [0.0000, 0.0000]),
+                (2, [0.0000, 0.0400]),
+                (3, [0.0400, 0.0400]),
+                (4, [0.0060, 0.0000]),
+            ],
+        }
+        highway_nodes = [
+            (5, [0.0030, 0.0000]),
+            (1, [0.0000, 0.0000]),
         ]
 
         graph = routes.RouteGraph(

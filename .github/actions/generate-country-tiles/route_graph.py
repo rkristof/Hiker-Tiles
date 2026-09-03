@@ -441,6 +441,7 @@ class RouteGraph:
                     for first_node, second_node in self._ordered_endpoint_pairs(
                         first_endpoints,
                         second_endpoints,
+                        max_distance,
                     ):
                         if self._repair_endpoint_pair(
                             sampler,
@@ -462,21 +463,50 @@ class RouteGraph:
             return
 
         max_distance = self._raw_route_distance * 0.10
+        min_graph_distance = self._raw_route_distance * 0.60
         while True:
-            endpoints = self._degree_one_endpoints()
-            if len(endpoints) < 2:
+            first_endpoints = self._degree_one_endpoints()
+            second_endpoints = set(first_endpoints)
+            second_endpoints.update(
+                node_id
+                for node_id in self._raw_graph
+                if any(
+                    way_id not in self._route_way_ids
+                    for way_id in self._connecting_highways_by_node.get(node_id, {})
+                )
+            )
+            if not first_endpoints or len(second_endpoints) < 2:
                 return
 
             repaired = False
             for component in nx.connected_components(self._raw_graph):
-                component_endpoints = [
+                component_first_endpoints = [
                     node_id
-                    for node_id in endpoints
+                    for node_id in first_endpoints
                     if node_id in component
                 ]
+                component_second_endpoints = [
+                    node_id
+                    for node_id in second_endpoints
+                    if node_id in component
+                ]
+                component_graph = self._raw_graph.subgraph(component)
+                shortest_paths = {
+                    first_node: nx.single_source_dijkstra_path_length(
+                        component_graph,
+                        first_node,
+                        cutoff=min_graph_distance,
+                        weight='weight',
+                    )
+                    for first_node in component_first_endpoints
+                }
                 for first_node, second_node in self._ordered_endpoint_pairs(
-                    component_endpoints,
+                    component_first_endpoints,
+                    component_second_endpoints,
+                    max_distance,
                 ):
+                    if second_node in shortest_paths[first_node]:
+                        continue
                     if self._repair_endpoint_pair(
                         sampler,
                         first_node,
@@ -490,26 +520,32 @@ class RouteGraph:
             if not repaired:
                 return
 
-    def _ordered_endpoint_pairs(self, first_endpoints, second_endpoints=None):
-        if second_endpoints is None:
-            pairs = (
-                (first_node, second_node)
-                for first_index, first_node in enumerate(first_endpoints)
-                for second_node in first_endpoints[first_index + 1:]
+    def _ordered_endpoint_pairs(self, first_endpoints, second_endpoints, max_distance):
+        pairs = {}
+        for first_node in first_endpoints:
+            for second_node in second_endpoints:
+                if first_node != second_node:
+                    pairs.setdefault(
+                        frozenset((first_node, second_node)),
+                        (first_node, second_node),
+                    )
+        pairs = pairs.values()
+        pairs = [
+            (
+                haversine_distance_m(
+                    self._raw_graph.nodes[first_node]['point'],
+                    self._raw_graph.nodes[second_node]['point'],
+                ),
+                first_node,
+                second_node,
             )
-        else:
-            pairs = (
-                (first_node, second_node)
-                for first_node in first_endpoints
-                for second_node in second_endpoints
-            )
-        return sorted(
-            pairs,
-            key=lambda pair: haversine_distance_m(
-                self._raw_graph.nodes[pair[0]]['point'],
-                self._raw_graph.nodes[pair[1]]['point'],
-            ),
-        )
+            for first_node, second_node in pairs
+        ]
+        pairs = [pair for pair in pairs if pair[0] < max_distance]
+        return [
+            (first_node, second_node)
+            for _, first_node, second_node in sorted(pairs, key=lambda pair: pair[0])
+        ]
 
     def _degree_one_endpoints(self):
         return [
@@ -625,7 +661,10 @@ class RouteGraph:
                     if target_index == node_index:
                         continue
                     step = 1 if target_index > node_index else -1
-                    path_nodes = nodes[node_index:target_index + step:step]
+                    path_nodes = [
+                        nodes[index]
+                        for index in range(node_index, target_index + step, step)
+                    ]
                     if not path_nodes:
                         continue
                     extension_distance = sum(
