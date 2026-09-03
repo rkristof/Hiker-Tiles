@@ -141,6 +141,8 @@ class EligibleNodeFinder:
         self._landmark_index = landmark_index
         self._settlement_index = settlement_index
         self._relation_node_order = {}
+        self._node_points_by_id = {}
+        self._route_neighbors_by_id = {}
 
         for node_id in route_relation.get('node_ids', ()):
             self._relation_node_order.setdefault(
@@ -148,11 +150,18 @@ class EligibleNodeFinder:
                 len(self._relation_node_order),
             )
         for way_id in route_relation.get('way_ids', ()):
-            for node_id, _ in way_nodes.get(way_id, ()):
+            nodes = way_nodes.get(way_id, ())
+            for index, (node_id, point) in enumerate(nodes):
                 self._relation_node_order.setdefault(
                     node_id,
                     len(self._relation_node_order),
                 )
+                self._node_points_by_id.setdefault(node_id, []).append(point)
+                neighbors = self._route_neighbors_by_id.setdefault(node_id, set())
+                if index > 0 and nodes[index - 1][0] != node_id:
+                    neighbors.add(nodes[index - 1][0])
+                if index + 1 < len(nodes) and nodes[index + 1][0] != node_id:
+                    neighbors.add(nodes[index + 1][0])
 
     def externally_accessible_nodes(self):
         """Return candidate route nodes touched by an outside highway way."""
@@ -195,13 +204,7 @@ class EligibleNodeFinder:
 
         landmark_scores = {}
         for node_id in self._candidate_node_ids if node_ids is None else node_ids:
-            node_points = [
-                point
-                for way_id in self._route_relation.get('way_ids', ())
-                for candidate_node_id, point in self._way_nodes.get(way_id, ())
-                if candidate_node_id == node_id
-            ]
-            for point in node_points:
+            for point in self._node_points_by_id.get(node_id, ()):
                 for landmark, landmark_point in self._landmark_index.nearby(point):
                     landmark_score = 0
                     landmark_multiplier = self._landmark_score_multiplier(landmark)
@@ -234,7 +237,7 @@ class EligibleNodeFinder:
             return {}
         scores = {}
         for node_id in self._candidate_node_ids if node_ids is None else node_ids:
-            for point in self._node_points(node_id):
+            for point in self._node_points_by_id.get(node_id, ()):
                 for settlement, settlement_point in self._settlement_index.nearby(point):
                     distance = haversine_distance_m(point, settlement_point)
                     proximity = max(
@@ -278,7 +281,9 @@ class EligibleNodeFinder:
             if maximum_external_score
             else 0
         )
-        route_degree_score = float(self._route_degree(node_id) == 1)
+        route_degree_score = float(
+            len(self._route_neighbors_by_id.get(node_id, ())) == 1
+        )
         return (
             30 * landmark_score
             + 30 * settlement_score
@@ -309,27 +314,6 @@ class EligibleNodeFinder:
             for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items()
             if way_id not in self._route_way_ids
         }
-
-    def _route_degree(self, node_id):
-        neighbors = set()
-        for way_id in self._route_relation.get('way_ids', ()):
-            nodes = self._way_nodes.get(way_id, ())
-            for index, (candidate_node_id, _) in enumerate(nodes):
-                if candidate_node_id != node_id:
-                    continue
-                if index > 0 and nodes[index - 1][0] != node_id:
-                    neighbors.add(nodes[index - 1][0])
-                if index + 1 < len(nodes) and nodes[index + 1][0] != node_id:
-                    neighbors.add(nodes[index + 1][0])
-        return len(neighbors)
-
-    def _node_points(self, node_id):
-        return [
-            point
-            for way_id in self._route_relation.get('way_ids', ())
-            for candidate_node_id, point in self._way_nodes.get(way_id, ())
-            if candidate_node_id == node_id
-        ]
 
     @staticmethod
     def _text_token_list(*values):

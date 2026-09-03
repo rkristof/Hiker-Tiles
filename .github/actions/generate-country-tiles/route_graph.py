@@ -502,6 +502,11 @@ class RouteGraph:
                     for node_id in second_endpoints
                     if node_id in component
                 ]
+                candidate_pairs = self._ordered_endpoint_pairs(
+                    component_first_endpoints,
+                    component_second_endpoints,
+                    max_distance,
+                )
                 component_graph = self._raw_graph.subgraph(component)
                 shortest_paths = {
                     first_node: nx.single_source_dijkstra_path_length(
@@ -510,13 +515,9 @@ class RouteGraph:
                         cutoff=min_graph_distance,
                         weight='weight',
                     )
-                    for first_node in component_first_endpoints
+                    for first_node in {first_node for first_node, _ in candidate_pairs}
                 }
-                for first_node, second_node in self._ordered_endpoint_pairs(
-                    component_first_endpoints,
-                    component_second_endpoints,
-                    max_distance,
-                ):
+                for first_node, second_node in candidate_pairs:
                     if second_node in shortest_paths[first_node]:
                         continue
                     if self._repair_endpoint_pair(

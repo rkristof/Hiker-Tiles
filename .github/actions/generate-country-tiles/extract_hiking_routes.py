@@ -304,10 +304,10 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
             return
 
         try:
+            if not any(node.ref in self._scan_node_ids for node in way.nodes):
+                return
             nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
         except osmium.InvalidLocationError:
-            return
-        if not any(node_id in self._scan_node_ids for node_id, _ in nodes):
             return
 
         highway = { 'highway_type': highway_type, 'nodes': nodes }

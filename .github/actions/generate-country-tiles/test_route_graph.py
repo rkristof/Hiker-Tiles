@@ -680,7 +680,7 @@ class RouteGraphTests(unittest.TestCase):
         )
 
         self.assertEqual(finder.externally_accessible_nodes(), {1, 2, 3})
-        self.assertEqual(finder._route_degree(1), 1)
+        self.assertEqual(len(finder._route_neighbors_by_id[1]), 1)
         self.assertEqual(finder._external_access_score(1), 1.5)
         self.assertEqual(finder._external_access_score(2), 3)
         self.assertGreater(finder._external_access_score(2), finder._external_access_score(1))
