@@ -86,6 +86,16 @@ def make_way_segment_distances(way_nodes):
     }
 
 
+def add_raw_distance(relation, way_nodes):
+    return {
+        **relation,
+        'raw_distance_m': sum(
+            sum(make_way_segment_distances(way_nodes).get(way_id, ()))
+            for way_id in relation['way_ids']
+        ),
+    }
+
+
 class RouteGraphTests(unittest.TestCase):
     @staticmethod
     def make_route_graph(
@@ -177,7 +187,7 @@ class RouteGraphTests(unittest.TestCase):
                 (3, [0.0020, 0.0000]),
             ],
         }
-        collector = types.SimpleNamespace(relations={1: relation})
+        collector = types.SimpleNamespace(relations={1: add_raw_distance(relation, way_nodes)})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
@@ -252,7 +262,7 @@ class RouteGraphTests(unittest.TestCase):
                 (3, [0.0020, 0.0000]),
             ],
         }
-        collector = types.SimpleNamespace(relations={1: relation})
+        collector = types.SimpleNamespace(relations={1: add_raw_distance(relation, way_nodes)})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
@@ -352,7 +362,7 @@ class RouteGraphTests(unittest.TestCase):
             2: [(3, [0.0100, 0.0000]), (4, [0.0110, 0.0000])],
             3: [(3, [0.0100, 0.0000]), (5, [0.0100, 0.0010])],
         }
-        collector = types.SimpleNamespace(relations={1: relation})
+        collector = types.SimpleNamespace(relations={1: add_raw_distance(relation, way_nodes)})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
@@ -427,7 +437,7 @@ class RouteGraphTests(unittest.TestCase):
             3: [(3, [0.0010, 0.0010]), (4, [0.0000, 0.0010])],
             4: [(4, [0.0000, 0.0010]), (1, [0.0000, 0.0000])],
         }
-        collector = types.SimpleNamespace(relations={1: relation})
+        collector = types.SimpleNamespace(relations={1: add_raw_distance(relation, way_nodes)})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
@@ -493,7 +503,7 @@ class RouteGraphTests(unittest.TestCase):
         way_nodes = {
             1: [(1, [0.0000, 0.0000]), (2, [0.5000, 0.0000])],
         }
-        collector = types.SimpleNamespace(relations={1: relation})
+        collector = types.SimpleNamespace(relations={1: add_raw_distance(relation, way_nodes)})
         exporter = types.SimpleNamespace(
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
@@ -573,6 +583,71 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(collector.relations[2]['node_ids'], [20])
         self.assertEqual(collector.relations[2]['name'], 'A - B')
         self.assertTrue(collector.relations[2]['roundtrip'])
+
+    def test_geojson_exporter_filters_highway_nodes_by_raw_route_distance(self):
+        class Node:
+            def __init__(self, node_id, point):
+                self.ref = node_id
+                self.lon, self.lat = point
+
+        class Way:
+            def __init__(self, way_id, points):
+                self.id = way_id
+                self.tags = {}
+                self.nodes = [
+                    Node(node_id, point)
+                    for node_id, point in points
+                ]
+
+        class Tag:
+            def __init__(self, key, value):
+                self.k = key
+                self.v = value
+
+        class Member:
+            def __init__(self, member_type, reference):
+                self.type = member_type
+                self.ref = reference
+                self.role = ''
+
+        class Relation:
+            def __init__(self, relation_id, way_id):
+                self.id = relation_id
+                self.members = [Member('w', way_id)]
+                self.tags = [Tag('type', 'route'), Tag('route', 'hiking')]
+
+        collector = routes.WayRouteCollector()
+        with patch.dict(os.environ, {'COUNTRY': 'hungary', 'SYMBOL_TAG': 'osmc:symbol'}):
+            collector.relation(Relation(1, 10))
+            collector.relation(Relation(2, 20))
+        way_nodes = {
+            10: [(1, [0.0, 0.0]), (2, [0.01, 0.0])],
+            20: [(3, [0.0, 0.0]), (4, [1.0, 0.0])],
+        }
+        collector.flatten_nested_routes()
+        exporter = routes.GeoJSONExporter(
+            collector.way_routes,
+            io.StringIO(),
+        )
+        exporter.way(Way(10, way_nodes[10]))
+        exporter.way(Way(20, way_nodes[20]))
+
+        for relation in collector.relations.values():
+            relation['raw_distance_m'] = sum(
+                sum(exporter.way_segment_distances.get(way_id, ()))
+                for way_id in relation['way_ids']
+            )
+
+        self.assertLess(collector.relations[1]['raw_distance_m'], routes.MAX_TRAVERSAL_DISTANCE_M)
+        self.assertGreater(collector.relations[2]['raw_distance_m'], routes.MAX_TRAVERSAL_DISTANCE_M)
+        route_node_ids = {
+            node_id
+            for relation in collector.relations.values()
+            if relation['raw_distance_m'] < routes.MAX_TRAVERSAL_DISTANCE_M
+            for way_id in relation['way_ids']
+            for node_id, _ in way_nodes.get(way_id, ())
+        }
+        self.assertEqual(route_node_ids, {1, 2})
 
     def test_flatten_nested_routes_merges_recursive_children_and_suppresses_them(self):
         class Tag:
@@ -1990,6 +2065,10 @@ class RouteGraphTests(unittest.TestCase):
                             int(way_id): nodes
                             for way_id, nodes in case['ways'].items()
                         }
+                        relation['raw_distance_m'] = sum(
+                            sum(make_way_segment_distances(way_nodes).get(way_id, ()))
+                            for way_id in relation['way_ids']
+                        )
                         route_node_ids = {
                             node_id
                             for nodes in way_nodes.values()

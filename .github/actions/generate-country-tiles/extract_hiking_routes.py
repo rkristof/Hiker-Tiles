@@ -459,7 +459,7 @@ class GeoJSONExporter(osmium.SimpleHandler):
             return
         coordinates = [point for _, point in nodes]
         self.way_nodes[way.id] = nodes
-        self.way_segment_distances[way.id] = [
+        self.way_segment_distances[way.id] = segment_distances = [
             haversine_distance_m(first_point, second_point)
             for (_, first_point), (_, second_point) in zip(nodes, nodes[1:])
         ]
@@ -656,13 +656,20 @@ def export_route_features(collector):
             endpoint_maps_by_node=endpoint_maps_by_node,
         )
         exporter.apply_file('tiles-filtered.osm.pbf', locations=True)
+        for relation in collector.relations.values():
+            relation['raw_distance_m'] = sum(
+                sum(exporter.way_segment_distances.get(way_id, ()))
+                for way_id in relation['way_ids']
+            )
         exporter.landmark_index = LandmarkIndex(exporter.landmarks)
         exporter.settlement_index = SettlementIndex(exporter.settlements)
         snap_relation_endpoints(exporter)
         route_node_ids = {
             node_id
-            for nodes in exporter.way_nodes.values()
-            for node_id, _ in nodes
+            for relation in collector.relations.values()
+            if relation['raw_distance_m'] < MAX_TRAVERSAL_DISTANCE_M
+            for way_id in relation['way_ids']
+            for node_id, _ in exporter.way_nodes.get(way_id, ())
         }
         collector = ConnectingHighwayCollector(route_node_ids)
         collector.collect_highways('highways-filtered.osm.pbf')
@@ -731,10 +738,7 @@ def write_route_lines(collector, exporter):
                     for way_id in route_relation['way_ids']
                 ]
 
-                distance_m = sum(
-                    sum(exporter.way_segment_distances.get(way_id, ()))
-                    for way_id in route_relation['way_ids']
-                )
+                distance_m = route_relation['raw_distance_m']
                 is_short_route = distance_m < MAX_TRAVERSAL_DISTANCE_M
                 if is_short_route:
                     inferred_start_node = None
