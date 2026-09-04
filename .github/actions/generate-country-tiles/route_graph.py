@@ -55,6 +55,11 @@ class RouteGraph:
                     points=[first_point, second_point],
                 )
 
+        if not self._raw_graph.number_of_edges():
+            self._raw_route_distance = 0
+            self._remaining_repair_distance = 0
+            return
+
         self._raw_route_distance = self._raw_graph.size(weight='weight')
         self._remaining_repair_distance = self._raw_route_distance * 0.10
         self._repair_disconnected_components(sampler)
@@ -62,17 +67,15 @@ class RouteGraph:
 
         if (
             not self._roundtrip
-            and self.has_edges
             and nx.is_eulerian(self._raw_graph)
         ):
             self._roundtrip = True
 
-        if self.has_edges:
-            self._create_compressed_graph(
-                (inferred_start_node,)
-                if inferred_start_node is not None
-                else ()
-            )
+        self._create_compressed_graph(
+            (inferred_start_node,)
+            if inferred_start_node is not None
+            else ()
+        )
 
     @property
     def has_edges(self):
@@ -111,29 +114,22 @@ class RouteGraph:
             component_graphs.append(component_graph)
         return component_graphs
 
-    def is_simple_line(self):
-        """Return whether the graph is one connected line without branches."""
-        if not self._graph or not nx.is_connected(self._graph):
-            return False
-        endpoints = [
-            node_id
-            for node_id, degree in self._graph.degree()
-            if degree == 1
-        ]
-        return len(endpoints) == 2 and all(
-            degree <= 2
-            for _, degree in self._graph.degree()
-        )
-
     def simple_line_endpoints(self):
         """Return simple-line start and end nodes in relation order."""
-        if not self.is_simple_line():
+        if not self._graph:
             return None
+
+        degrees = tuple(self._graph.degree())
         endpoints = [
             node_id
-            for node_id, degree in self._graph.degree()
+            for node_id, degree in degrees
             if degree == 1
         ]
+        if len(endpoints) != 2 or any(degree > 2 for _, degree in degrees):
+            return None
+        if not nx.is_connected(self._graph):
+            return None
+
         start_node = min(endpoints, key=self._relation_node_order.__getitem__)
         finish_node = next(node_id for node_id in endpoints if node_id != start_node)
         return start_node, finish_node
@@ -241,28 +237,29 @@ class RouteGraph:
         ) or [start_node]
         shortest_traversal = None
         shortest_distance = float('inf')
+        odd_nodes = [
+            node_id
+            for node_id, degree in graph.degree()
+            if degree % 2
+        ]
 
         for candidate_finish in finish_nodes:
-            odd_nodes = [
-                node_id
-                for node_id, degree in graph.degree()
-                if degree % 2
-            ]
+            candidate_odd_nodes = odd_nodes.copy()
             for endpoint in (start_node, candidate_finish):
-                if endpoint in odd_nodes:
-                    odd_nodes.remove(endpoint)
+                if endpoint in candidate_odd_nodes:
+                    candidate_odd_nodes.remove(endpoint)
                 else:
-                    odd_nodes.append(endpoint)
+                    candidate_odd_nodes.append(endpoint)
 
             matching_graph = nx.Graph()
             shortest_paths = {}
-            for first_index, first_node in enumerate(odd_nodes):
+            for first_index, first_node in enumerate(candidate_odd_nodes):
                 distances, paths = nx.single_source_dijkstra(
                     graph,
                     first_node,
                     weight='weight',
                 )
-                for second_node in odd_nodes[first_index + 1:]:
+                for second_node in candidate_odd_nodes[first_index + 1:]:
                     matching_graph.add_edge(
                         first_node,
                         second_node,
@@ -507,6 +504,8 @@ class RouteGraph:
                     component_second_endpoints,
                     max_distance,
                 )
+                if not candidate_pairs:
+                    continue
                 component_graph = self._raw_graph.subgraph(component)
                 shortest_paths = {
                     first_node: nx.single_source_dijkstra_path_length(
@@ -606,7 +605,6 @@ class RouteGraph:
     def _shortest_highway_path(self, first_node, second_node, max_distance):
         first_point = self._raw_graph.nodes[first_node]['point']
         second_point = self._raw_graph.nodes[second_node]['point']
-        initial_distance = haversine_distance_m(first_point, second_point)
         distances = {first_node: 0}
         predecessors = {}
         queue = [(0, first_node)]
@@ -664,6 +662,7 @@ class RouteGraph:
                         heapq.heappush(queue, (target_distance, target_node))
 
         if second_node not in distances:
+            initial_distance = haversine_distance_m(first_point, second_point)
             if initial_distance >= max_distance * 0.5:
                 return None
             return {

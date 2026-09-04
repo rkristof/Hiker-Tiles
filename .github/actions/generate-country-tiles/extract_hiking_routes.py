@@ -674,8 +674,8 @@ def write_route_lines(collector, exporter):
                     < route_graph.traversal_distance(traversal)
                 ):
                     traversal = roundtrip_traversal
-        elif route_graph.is_simple_line():
-            start_node, finish_node = route_graph.simple_line_endpoints()
+        elif (line_endpoints := route_graph.simple_line_endpoints()) is not None:
+            start_node, finish_node = line_endpoints
             traversal = route_graph.shortest_complete_traversal(start_node, finish_node)
         else:
             if route_graph.is_eulerian():
