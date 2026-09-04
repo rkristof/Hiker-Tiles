@@ -651,8 +651,12 @@ class RouteGraphTests(unittest.TestCase):
                 self.tags = {'highway': highway_type}
                 self.nodes = [Node(node_id) for node_id in node_ids]
 
-        collector = routes.ConnectingHighwayCollector({2})
-        collector.way(Way(20, 'residential', [1, 2]))
+        class TestCollector(routes.ConnectingHighwayCollector):
+            def apply_file(self, filename, locations=False):
+                self.way(Way(20, 'residential', [1, 2]))
+
+        collector = TestCollector({2})
+        collector.collect_highways('unused.osm.pbf')
 
         self.assertEqual(
             collector.connecting_highways_by_node(),
@@ -704,10 +708,17 @@ class RouteGraphTests(unittest.TestCase):
                 self.tags = {'highway': highway_type}
                 self.nodes = [Node(node_id) for node_id in node_ids]
 
-        collector = routes.ConnectingHighwayCollector({1, 4})
-        collector.way(Way(10, 'path', [1, 2]))
-        collector.way(Way(20, 'residential', [2, 3]))
-        collector.way(Way(30, 'path', [4, 5]))
+        class TestCollector(routes.ConnectingHighwayCollector):
+            def apply_file(self, filename, locations=False):
+                for way in (
+                    Way(10, 'path', [1, 2]),
+                    Way(20, 'residential', [2, 3]),
+                    Way(30, 'path', [4, 5]),
+                ):
+                    self.way(way)
+
+        collector = TestCollector({1, 4})
+        collector.collect_highways('unused.osm.pbf')
 
         self.assertEqual(
             collector.connecting_highways_by_node(),
@@ -717,7 +728,7 @@ class RouteGraphTests(unittest.TestCase):
             },
         )
 
-    def test_connecting_highway_collector_reads_way_nodes_once(self):
+    def test_connecting_highway_collector_reads_way_nodes_once_per_pass(self):
         class Node:
             def __init__(self, node_id):
                 self.ref = node_id
@@ -736,10 +747,18 @@ class RouteGraphTests(unittest.TestCase):
                 self.node_accesses += 1
                 return self.node_values
 
-        way = Way()
-        routes.ConnectingHighwayCollector({1}).way(way)
+        class TestCollector(routes.ConnectingHighwayCollector):
+            def __init__(self, route_node_ids, way):
+                super().__init__(route_node_ids)
+                self.way_to_read = way
 
-        self.assertEqual(way.node_accesses, 1)
+            def apply_file(self, filename, locations=False):
+                self.way(self.way_to_read)
+
+        way = Way()
+        TestCollector({1}, way).collect_highways('unused.osm.pbf')
+
+        self.assertEqual(way.node_accesses, 2)
 
     def test_connecting_highway_collector_indexes_adjacent_highways(self):
         class Node:
@@ -755,13 +774,33 @@ class RouteGraphTests(unittest.TestCase):
                 self.nodes = [Node(node_id) for node_id in node_ids]
 
         class TestCollector(routes.ConnectingHighwayCollector):
+            def __init__(self, route_node_ids):
+                super().__init__(route_node_ids)
+                self.pass_number = 0
+                self.locations = []
+                self.first_pass_highways = None
+
             def apply_file(self, filename, locations=False):
-                self.way(Way(20, 'path', [2, 3]))
+                self.locations.append(locations)
+                ways = (
+                    (Way(10, 'residential', [1, 2]),)
+                    if self.pass_number == 0
+                    else (
+                        Way(10, 'residential', [1, 2]),
+                        Way(20, 'path', [2, 3]),
+                    )
+                )
+                self.pass_number += 1
+                for way in ways:
+                    self.way(way)
+                if self.pass_number == 1:
+                    self.first_pass_highways = dict(self._highways_by_id)
 
         collector = TestCollector({1})
-        collector.way(Way(10, 'residential', [1, 2]))
-        collector.collect_adjacent_highways('unused.osm.pbf')
+        collector.collect_highways('unused.osm.pbf')
 
+        self.assertEqual(collector.locations, [False, True])
+        self.assertEqual(collector.first_pass_highways, {})
         self.assertEqual(
             collector.connecting_highways_by_node(),
             {1: {10: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
