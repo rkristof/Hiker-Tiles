@@ -86,7 +86,10 @@ class RouteGraph:
         return nx.number_connected_components(self._graph)
 
     def component_graphs(self):
-        """Return independent RouteGraph views for each connected component."""
+        """Return RouteGraph views for each connected component."""
+        if self._graph and nx.is_connected(self._graph):
+            return [self]
+
         components = sorted(
             nx.connected_components(self._graph),
             key=lambda component: min(component),
@@ -331,7 +334,7 @@ class RouteGraph:
 
     def _create_compressed_graph(self, additional_nodes=()):
         # Compress topological edges; raw graph retains duplicate route members.
-        raw_graph = nx.MultiGraph(nx.Graph(self._raw_graph))
+        raw_graph = nx.Graph(self._raw_graph)
         retained_nodes = {
             node_id
             for node_id, degree in raw_graph.degree()
@@ -359,20 +362,20 @@ class RouteGraph:
 
         for start_node in retained_nodes:
             while raw_graph.degree(start_node):
-                _, current_node, edge_key, edge_data = next(
-                    iter(raw_graph.edges(start_node, keys=True, data=True)),
+                _, current_node, edge_data = next(
+                    iter(raw_graph.edges(start_node, data=True)),
                 )
-                raw_graph.remove_edge(start_node, current_node, edge_key)
+                raw_graph.remove_edge(start_node, current_node)
                 edge_weight = edge_data['weight']
                 edge_points = list(edge_data['points'])
                 if edge_points[0] != raw_graph.nodes[start_node]['point']:
                     edge_points.reverse()
 
                 while current_node not in retained_nodes:
-                    _, next_node, next_edge_key, next_edge_data = next(
-                        iter(raw_graph.edges(current_node, keys=True, data=True)),
+                    _, next_node, next_edge_data = next(
+                        iter(raw_graph.edges(current_node, data=True)),
                     )
-                    raw_graph.remove_edge(current_node, next_node, next_edge_key)
+                    raw_graph.remove_edge(current_node, next_node)
                     edge_weight += next_edge_data['weight']
                     next_points = list(next_edge_data['points'])
                     if next_points[0] != raw_graph.nodes[current_node]['point']:
@@ -388,7 +391,12 @@ class RouteGraph:
                 )
 
         self._graph = simple_graph
-        if self._roundtrip and self._graph and nx.is_connected(self._graph):
+        if (
+            self._roundtrip
+            and self._graph
+            and nx.is_connected(self._graph)
+            and not nx.is_eulerian(self._graph)
+        ):
             self._graph = self._eulerize_graph(self._graph)
 
     @staticmethod
