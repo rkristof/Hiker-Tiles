@@ -1,6 +1,5 @@
 import json
 import os
-
 import osmium
 
 from eligible_nodes import (
@@ -10,6 +9,7 @@ from eligible_nodes import (
     landmark_candidate,
 )
 from elevation import Elevation, offset_elevation_profile
+from native_highway_collector import NativeHighwayCollector
 from route_graph import RouteGraph
 from utils import haversine_distance_m, polyline_distance_m
 
@@ -287,96 +287,6 @@ class WayRouteCollector(osmium.SimpleHandler):
                 return True
 
         return False
-
-
-class ConnectingHighwayCollector(osmium.SimpleHandler):
-    def __init__(self, route_node_ids):
-        super().__init__()
-        self._route_node_ids = set(route_node_ids)
-        self._direct_way_ids = set()
-        self._direct_node_ids = set()
-        self._highways_by_id = {}
-        self._collecting_geometry = False
-
-    def way(self, way):
-        highway_type = way.tags.get('highway')
-        if highway_type is None:
-            return
-
-        try:
-            osmium_nodes = tuple(way.nodes)
-            node_ids = tuple(node.ref for node in osmium_nodes)
-            if not self._collecting_geometry:
-                if not any(node_id in self._route_node_ids for node_id in node_ids):
-                    return
-                self._direct_way_ids.add(way.id)
-                self._direct_node_ids.update(node_ids)
-                return
-            if (
-                way.id not in self._direct_way_ids
-                and not any(node_id in self._direct_node_ids for node_id in node_ids)
-            ):
-                return
-            nodes = [(node.ref, [node.lon, node.lat]) for node in osmium_nodes]
-        except osmium.InvalidLocationError:
-            return
-
-        self._highways_by_id[way.id] = {'highway_type': highway_type, 'nodes': nodes}
-
-    def collect_highways(self, filename):
-        self.apply_file(filename, locations=False)
-        self._collecting_geometry = True
-        try:
-            self.apply_file(filename, locations=True)
-        finally:
-            self._collecting_geometry = False
-
-    def connecting_highways_by_node(self):
-        highways_by_node = {}
-        for way_id in self._direct_way_ids:
-            highway = self._highways_by_id[way_id]
-            for node_id, _ in highway['nodes']:
-                if node_id in self._route_node_ids:
-                    highways_by_node.setdefault(node_id, {})[way_id] = highway
-        return highways_by_node
-
-    def highway_index(self):
-        highways_by_node = {}
-        for way_id, highway in self._highways_by_id.items():
-            nodes = highway['nodes']
-            for node_index, (node_id, _) in enumerate(nodes):
-                highways_by_node.setdefault(node_id, []).append(
-                    (way_id, node_index),
-                )
-        return HighwayIndex(
-            {
-                node_id: tuple(highways)
-                for node_id, highways in highways_by_node.items()
-            },
-            self._highways_by_id,
-        )
-
-
-class HighwayIndex(dict):
-    def __init__(self, highways_by_node, highways_by_id):
-        super().__init__(highways_by_node)
-        self._highways_by_id = highways_by_id
-        self._segment_distance_cache = {}
-
-    def highway(self, way_id):
-        return self._highways_by_id[way_id]
-
-    def segment_distance(self, way_id, segment_index):
-        cache_key = (way_id, segment_index)
-        if cache_key not in self._segment_distance_cache:
-            highway = self.highway(way_id)
-            first_point = highway['nodes'][segment_index][1]
-            second_point = highway['nodes'][segment_index + 1][1]
-            self._segment_distance_cache[cache_key] = haversine_distance_m(
-                first_point,
-                second_point,
-            )
-        return self._segment_distance_cache[cache_key]
 
 
 class GeoJSONExporter(osmium.SimpleHandler):
@@ -674,7 +584,7 @@ def export_route_features(collector):
             for way_id in relation['way_ids']
             for node_id, _ in exporter.way_nodes.get(way_id, ())
         }
-        collector = ConnectingHighwayCollector(route_node_ids)
+        collector = NativeHighwayCollector(route_node_ids)
         collector.collect_highways('highways-filtered.osm.pbf')
         exporter.connecting_highways_by_node = collector.connecting_highways_by_node()
         exporter.highway_index = collector.highway_index()
