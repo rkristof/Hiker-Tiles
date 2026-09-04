@@ -61,8 +61,21 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g
-        pip3 install networkx osmium rasterio
+        sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g libbz2-1.0 libexpat1 liblz4-1
+        pip3 install networkx numpy osmium rasterio
+
+    - name: Download native highway collector
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release download native-highway-collector-latest \
+          --repo ${{ github.repository }} \
+          --pattern 'native-highway-collector-linux-amd64.tar.gz' \
+          --output /tmp/native-highway-collector.tar.gz
+        sudo tar -xzf /tmp/native-highway-collector.tar.gz -C /usr/local/bin
+        sudo chmod 0755 /usr/local/bin/native-highway-collector
+        rm /tmp/native-highway-collector.tar.gz
 
     - name: Generate base map tiles
       uses: ./.github/actions/generate-base-tiles
@@ -83,7 +96,7 @@ runs:
         SYMBOL_TAG: ${{ inputs.symbol_tag }}
       run: |
         # Keep route geometry and access highways in separate files. The route
-        # exporter retains geometry only for highways touching route nodes.
+        # Native collector retains geometry through three highway adjacency levels.
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
           n/checkpoint=hiking \

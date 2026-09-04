@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,8 +29,6 @@ from eligible_nodes import (
     SettlementIndex,
     landmark_candidate,
 )
-
-
 class ConstantSampler:
     def __init__(self, elevation=100):
         self.elevation = elevation
@@ -45,6 +44,37 @@ def highway_data(highway_type, nodes):
     }
 
 
+class TestHighwayIndex(Mapping):
+    def __init__(self, highways_by_node, highways_by_id):
+        self._highways_by_node = highways_by_node
+        self._highways_by_id = highways_by_id
+        self._segment_distance_cache = {}
+
+    def __getitem__(self, node_id):
+        return self._highways_by_node[node_id]
+
+    def __iter__(self):
+        return iter(self._highways_by_node)
+
+    def __len__(self):
+        return len(self._highways_by_node)
+
+    def highway(self, way_id):
+        return self._highways_by_id[way_id]
+
+    def segment_distance(self, way_id, segment_index):
+        cache_key = (way_id, segment_index)
+        if cache_key not in self._segment_distance_cache:
+            highway = self.highway(way_id)
+            first_point = highway['nodes'][segment_index][1]
+            second_point = highway['nodes'][segment_index + 1][1]
+            self._segment_distance_cache[cache_key] = routes.haversine_distance_m(
+                first_point,
+                second_point,
+            )
+        return self._segment_distance_cache[cache_key]
+
+
 def make_highway_index(highways_by_node):
     unique_highways = {}
     for highways in highways_by_node.values():
@@ -57,7 +87,7 @@ def make_highway_index(highways_by_node):
             indexed_highways.setdefault(node_id, []).append(
                 (way_id, node_index),
             )
-    return routes.HighwayIndex(
+    return TestHighwayIndex(
         {
             node_id: tuple(highways)
             for node_id, highways in indexed_highways.items()
@@ -713,31 +743,6 @@ class RouteGraphTests(unittest.TestCase):
 
         self.assertEqual(exporter.landmarks, [])
 
-    def test_connecting_highway_collector_records_matching_route_nodes(self):
-        class Node:
-            def __init__(self, node_id):
-                self.ref = node_id
-                self.lon = float(node_id)
-                self.lat = 0.0
-
-        class Way:
-            def __init__(self, way_id, highway_type, node_ids):
-                self.id = way_id
-                self.tags = {'highway': highway_type}
-                self.nodes = [Node(node_id) for node_id in node_ids]
-
-        class TestCollector(routes.ConnectingHighwayCollector):
-            def apply_file(self, filename, locations=False):
-                self.way(Way(20, 'residential', [1, 2]))
-
-        collector = TestCollector({2})
-        collector.collect_highways('unused.osm.pbf')
-
-        self.assertEqual(
-            collector.connecting_highways_by_node(),
-            {2: {20: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
-        )
-
     def test_eligible_node_score_prefers_high_highway_nodes(self):
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {
@@ -769,138 +774,6 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(finder._external_access_score(1), 1.5)
         self.assertEqual(finder._external_access_score(2), 3)
         self.assertGreater(finder._external_access_score(2), finder._external_access_score(1))
-
-    def test_connecting_highway_collector_records_only_direct_connections(self):
-        class Node:
-            def __init__(self, node_id):
-                self.ref = node_id
-                self.lon = float(node_id)
-                self.lat = 0.0
-
-        class Way:
-            def __init__(self, way_id, highway_type, node_ids):
-                self.id = way_id
-                self.tags = {'highway': highway_type}
-                self.nodes = [Node(node_id) for node_id in node_ids]
-
-        class TestCollector(routes.ConnectingHighwayCollector):
-            def apply_file(self, filename, locations=False):
-                for way in (
-                    Way(10, 'path', [1, 2]),
-                    Way(20, 'residential', [2, 3]),
-                    Way(30, 'path', [4, 5]),
-                ):
-                    self.way(way)
-
-        collector = TestCollector({1, 4})
-        collector.collect_highways('unused.osm.pbf')
-
-        self.assertEqual(
-            collector.connecting_highways_by_node(),
-            {
-                1: {10: highway_data('path', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])},
-                4: {30: highway_data('path', [(4, [4.0, 0.0]), (5, [5.0, 0.0])])},
-            },
-        )
-
-    def test_connecting_highway_collector_reads_way_nodes_once_per_pass(self):
-        class Node:
-            def __init__(self, node_id):
-                self.ref = node_id
-                self.lon = float(node_id)
-                self.lat = 0.0
-
-        class Way:
-            def __init__(self):
-                self.id = 10
-                self.tags = {'highway': 'path'}
-                self.node_values = [Node(1), Node(2)]
-                self.node_accesses = 0
-
-            @property
-            def nodes(self):
-                self.node_accesses += 1
-                return self.node_values
-
-        class TestCollector(routes.ConnectingHighwayCollector):
-            def __init__(self, route_node_ids, way):
-                super().__init__(route_node_ids)
-                self.way_to_read = way
-
-            def apply_file(self, filename, locations=False):
-                self.way(self.way_to_read)
-
-        way = Way()
-        TestCollector({1}, way).collect_highways('unused.osm.pbf')
-
-        self.assertEqual(way.node_accesses, 2)
-
-    def test_connecting_highway_collector_indexes_adjacent_highways(self):
-        class Node:
-            def __init__(self, node_id):
-                self.ref = node_id
-                self.lon = float(node_id)
-                self.lat = 0.0
-
-        class Way:
-            def __init__(self, way_id, highway_type, node_ids):
-                self.id = way_id
-                self.tags = {'highway': highway_type}
-                self.nodes = [Node(node_id) for node_id in node_ids]
-
-        class TestCollector(routes.ConnectingHighwayCollector):
-            def __init__(self, route_node_ids):
-                super().__init__(route_node_ids)
-                self.pass_number = 0
-                self.locations = []
-                self.first_pass_highways = None
-
-            def apply_file(self, filename, locations=False):
-                self.locations.append(locations)
-                ways = (
-                    (Way(10, 'residential', [1, 2]),)
-                    if self.pass_number == 0
-                    else (
-                        Way(10, 'residential', [1, 2]),
-                        Way(20, 'path', [2, 3]),
-                    )
-                )
-                self.pass_number += 1
-                for way in ways:
-                    self.way(way)
-                if self.pass_number == 1:
-                    self.first_pass_highways = dict(self._highways_by_id)
-
-        collector = TestCollector({1})
-        collector.collect_highways('unused.osm.pbf')
-
-        self.assertEqual(collector.locations, [False, True])
-        self.assertEqual(collector.first_pass_highways, {})
-        self.assertEqual(
-            collector.connecting_highways_by_node(),
-            {1: {10: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
-        )
-        repair_index = collector.highway_index()
-        self.assertEqual(
-            repair_index[2],
-            (
-                (10, 1),
-                (20, 0),
-            ),
-        )
-        self.assertEqual(repair_index._segment_distance_cache, {})
-        self.assertEqual(
-            repair_index.highway(20),
-            highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])]),
-        )
-        distance = repair_index.segment_distance(20, 0)
-        self.assertEqual(len(repair_index._segment_distance_cache), 1)
-        self.assertAlmostEqual(
-            distance,
-            routes.haversine_distance_m([2.0, 0.0], [3.0, 0.0]),
-        )
-        self.assertEqual(repair_index.segment_distance(20, 0), distance)
-        self.assertEqual(len(repair_index._segment_distance_cache), 1)
 
     def test_inferred_simple_line_uses_ordered_leaves(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
@@ -1704,7 +1577,7 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(graph._raw_graph.number_of_edges(), 4)
 
     def test_near_closed_route_uses_adjacent_highway_chain(self):
-        class CountingHighwaysByNode(routes.HighwayIndex):
+        class CountingHighwaysByNode(TestHighwayIndex):
             def __init__(self, highways_by_node):
                 highway_index = make_highway_index(highways_by_node)
                 super().__init__(highway_index, highway_index._highways_by_id)
