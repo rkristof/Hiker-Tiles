@@ -55,13 +55,14 @@ def make_highway_index(highways_by_node):
         nodes = highway['nodes']
         for node_index, (node_id, _) in enumerate(nodes):
             indexed_highways.setdefault(node_id, []).append(
-                (way_id, highway, node_index),
+                (way_id, node_index),
             )
     return routes.HighwayIndex(
         {
             node_id: tuple(highways)
             for node_id, highways in indexed_highways.items()
         },
+        unique_highways,
     )
 
 
@@ -716,6 +717,30 @@ class RouteGraphTests(unittest.TestCase):
             },
         )
 
+    def test_connecting_highway_collector_reads_way_nodes_once(self):
+        class Node:
+            def __init__(self, node_id):
+                self.ref = node_id
+                self.lon = float(node_id)
+                self.lat = 0.0
+
+        class Way:
+            def __init__(self):
+                self.id = 10
+                self.tags = {'highway': 'path'}
+                self.node_values = [Node(1), Node(2)]
+                self.node_accesses = 0
+
+            @property
+            def nodes(self):
+                self.node_accesses += 1
+                return self.node_values
+
+        way = Way()
+        routes.ConnectingHighwayCollector({1}).way(way)
+
+        self.assertEqual(way.node_accesses, 1)
+
     def test_connecting_highway_collector_indexes_adjacent_highways(self):
         class Node:
             def __init__(self, node_id):
@@ -745,19 +770,22 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(
             repair_index[2],
             (
-                (10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])]), 1),
-                (20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])]), 0),
+                (10, 1),
+                (20, 0),
             ),
         )
         self.assertEqual(repair_index._segment_distance_cache, {})
-        highway = repair_index[2][1][1]
-        distance = repair_index.segment_distance(20, highway, 0)
+        self.assertEqual(
+            repair_index.highway(20),
+            highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])]),
+        )
+        distance = repair_index.segment_distance(20, 0)
         self.assertEqual(len(repair_index._segment_distance_cache), 1)
         self.assertAlmostEqual(
             distance,
             routes.haversine_distance_m([2.0, 0.0], [3.0, 0.0]),
         )
-        self.assertEqual(repair_index.segment_distance(20, highway, 0), distance)
+        self.assertEqual(repair_index.segment_distance(20, 0), distance)
         self.assertEqual(len(repair_index._segment_distance_cache), 1)
 
     def test_inferred_simple_line_uses_ordered_leaves(self):
@@ -1565,7 +1593,7 @@ class RouteGraphTests(unittest.TestCase):
         class CountingHighwaysByNode(routes.HighwayIndex):
             def __init__(self, highways_by_node):
                 highway_index = make_highway_index(highways_by_node)
-                super().__init__(highway_index)
+                super().__init__(highway_index, highway_index._highways_by_id)
                 self.queries = []
 
             def get(self, node_id, default=()):

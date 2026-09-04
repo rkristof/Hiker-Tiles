@@ -304,9 +304,10 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
             return
 
         try:
-            if not any(node.ref in self._scan_node_ids for node in way.nodes):
+            osmium_nodes = tuple(way.nodes)
+            if not any(node.ref in self._scan_node_ids for node in osmium_nodes):
                 return
-            nodes = [(node.ref, [node.lon, node.lat]) for node in way.nodes]
+            nodes = [(node.ref, [node.lon, node.lat]) for node in osmium_nodes]
         except osmium.InvalidLocationError:
             return
 
@@ -346,24 +347,30 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
             nodes = highway['nodes']
             for node_index, (node_id, _) in enumerate(nodes):
                 highways_by_node.setdefault(node_id, []).append(
-                    (way_id, highway, node_index),
+                    (way_id, node_index),
                 )
         return HighwayIndex(
             {
                 node_id: tuple(highways)
                 for node_id, highways in highways_by_node.items()
             },
+            self._highways_by_id,
         )
 
 
 class HighwayIndex(dict):
-    def __init__(self, highways_by_node):
+    def __init__(self, highways_by_node, highways_by_id):
         super().__init__(highways_by_node)
+        self._highways_by_id = highways_by_id
         self._segment_distance_cache = {}
 
-    def segment_distance(self, way_id, highway, segment_index):
+    def highway(self, way_id):
+        return self._highways_by_id[way_id]
+
+    def segment_distance(self, way_id, segment_index):
         cache_key = (way_id, segment_index)
         if cache_key not in self._segment_distance_cache:
+            highway = self.highway(way_id)
             first_point = highway['nodes'][segment_index][1]
             second_point = highway['nodes'][segment_index + 1][1]
             self._segment_distance_cache[cache_key] = haversine_distance_m(

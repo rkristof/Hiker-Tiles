@@ -612,7 +612,8 @@ class RouteGraph:
             for node_id, highway_nodes in self._highway_index.items():
                 if node_id in self._raw_graph:
                     continue
-                _, highway, node_index = highway_nodes[0]
+                way_id, node_index = highway_nodes[0]
+                highway = self._highway_index.highway(way_id)
                 point = highway['nodes'][node_index][1]
                 distance = haversine_distance_m(first_point, point)
                 if distance <= max_distance:
@@ -626,9 +627,10 @@ class RouteGraph:
                 continue
             if current_node == second_node:
                 break
-            for way_id, highway, node_index in self._highway_index.get(current_node, ()):
+            for way_id, node_index in self._highway_index.get(current_node, ()):
                 if way_id in self._route_way_ids:
                     continue
+                highway = self._highway_index.highway(way_id)
                 current_point = highway['nodes'][node_index][1]
                 for target_index in (node_index - 1, node_index + 1):
                     if not 0 <= target_index < len(highway['nodes']):
@@ -636,7 +638,6 @@ class RouteGraph:
                     target_node, target_point = highway['nodes'][target_index]
                     extension_distance = self._highway_index.segment_distance(
                         way_id,
-                        highway,
                         min(node_index, target_index),
                     )
                     target_distance = distance + extension_distance
