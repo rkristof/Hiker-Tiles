@@ -343,12 +343,34 @@ class ConnectingHighwayCollector(osmium.SimpleHandler):
     def highway_index(self):
         highways_by_node = {}
         for way_id, highway in self._highways_by_id.items():
-            for node_id, _ in highway['nodes']:
-                highways_by_node.setdefault(node_id, []).append((way_id, highway))
-        return {
-            node_id: tuple(highways)
-            for node_id, highways in highways_by_node.items()
-        }
+            nodes = highway['nodes']
+            for node_index, (node_id, _) in enumerate(nodes):
+                highways_by_node.setdefault(node_id, []).append(
+                    (way_id, highway, node_index),
+                )
+        return HighwayIndex(
+            {
+                node_id: tuple(highways)
+                for node_id, highways in highways_by_node.items()
+            },
+        )
+
+
+class HighwayIndex(dict):
+    def __init__(self, highways_by_node):
+        super().__init__(highways_by_node)
+        self._segment_distance_cache = {}
+
+    def segment_distance(self, way_id, highway, segment_index):
+        cache_key = (way_id, segment_index)
+        if cache_key not in self._segment_distance_cache:
+            first_point = highway['nodes'][segment_index][1]
+            second_point = highway['nodes'][segment_index + 1][1]
+            self._segment_distance_cache[cache_key] = haversine_distance_m(
+                first_point,
+                second_point,
+            )
+        return self._segment_distance_cache[cache_key]
 
 
 class GeoJSONExporter(osmium.SimpleHandler):

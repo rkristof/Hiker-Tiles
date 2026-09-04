@@ -52,12 +52,17 @@ def make_highway_index(highways_by_node):
             unique_highways[way_id] = highway
     indexed_highways = {}
     for way_id, highway in unique_highways.items():
-        for node_id, _ in highway['nodes']:
-            indexed_highways.setdefault(node_id, []).append((way_id, highway))
-    return {
-        node_id: tuple(highways)
-        for node_id, highways in indexed_highways.items()
-    }
+        nodes = highway['nodes']
+        for node_index, (node_id, _) in enumerate(nodes):
+            indexed_highways.setdefault(node_id, []).append(
+                (way_id, highway, node_index),
+            )
+    return routes.HighwayIndex(
+        {
+            node_id: tuple(highways)
+            for node_id, highways in indexed_highways.items()
+        },
+    )
 
 
 class SteepSampler:
@@ -95,7 +100,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes,
             make_way_segment_distances(way_nodes),
             connecting_highways_by_node=connecting_highways_by_node,
-            highway_index=highway_index if highway_index is not None else {},
+            highway_index=highway_index if highway_index is not None else make_highway_index({}),
             sampler=sampler,
             roundtrip=roundtrip,
         )
@@ -176,7 +181,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             connecting_highways_by_node={},
-            highway_index={},
+            highway_index=make_highway_index({}),
             landmark_index=None,
             settlement_index=None,
         )
@@ -251,7 +256,7 @@ class RouteGraphTests(unittest.TestCase):
             way_nodes=way_nodes,
             way_segment_distances=make_way_segment_distances(way_nodes),
             connecting_highways_by_node={},
-            highway_index={},
+            highway_index=make_highway_index({}),
             landmark_index=None,
             settlement_index=None,
         )
@@ -352,7 +357,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
-            highway_index={},
+            highway_index=make_highway_index({}),
             landmark_index=None,
             settlement_index=None,
         )
@@ -427,7 +432,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
-            highway_index={},
+            highway_index=make_highway_index({}),
             landmark_index=None,
             settlement_index=None,
         )
@@ -493,7 +498,7 @@ class RouteGraphTests(unittest.TestCase):
             way_segment_distances=make_way_segment_distances(way_nodes),
             node_coordinates={},
             connecting_highways_by_node={},
-            highway_index={},
+            highway_index=make_highway_index({}),
             landmark_index=None,
             settlement_index=None,
         )
@@ -736,17 +741,24 @@ class RouteGraphTests(unittest.TestCase):
             collector.connecting_highways_by_node(),
             {1: {10: highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])}},
         )
+        repair_index = collector.highway_index()
         self.assertEqual(
-            collector.highway_index(),
-            {
-                1: ((10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])),),
-                2: (
-                    (10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])])),
-                    (20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])])),
-                ),
-                3: ((20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])])),),
-            },
+            repair_index[2],
+            (
+                (10, highway_data('residential', [(1, [1.0, 0.0]), (2, [2.0, 0.0])]), 1),
+                (20, highway_data('path', [(2, [2.0, 0.0]), (3, [3.0, 0.0])]), 0),
+            ),
         )
+        self.assertEqual(repair_index._segment_distance_cache, {})
+        highway = repair_index[2][1][1]
+        distance = repair_index.segment_distance(20, highway, 0)
+        self.assertEqual(len(repair_index._segment_distance_cache), 1)
+        self.assertAlmostEqual(
+            distance,
+            routes.haversine_distance_m([2.0, 0.0], [3.0, 0.0]),
+        )
+        self.assertEqual(repair_index.segment_distance(20, highway, 0), distance)
+        self.assertEqual(len(repair_index._segment_distance_cache), 1)
 
     def test_inferred_simple_line_uses_ordered_leaves(self):
         relation = {'way_ids': [1, 2, 3], 'node_roles': {}}
@@ -1550,9 +1562,10 @@ class RouteGraphTests(unittest.TestCase):
         self.assertEqual(graph._raw_graph.number_of_edges(), 4)
 
     def test_near_closed_route_uses_adjacent_highway_chain(self):
-        class CountingHighwaysByNode(dict):
+        class CountingHighwaysByNode(routes.HighwayIndex):
             def __init__(self, highways_by_node):
-                super().__init__(make_highway_index(highways_by_node))
+                highway_index = make_highway_index(highways_by_node)
+                super().__init__(highway_index)
                 self.queries = []
 
             def get(self, node_id, default=()):
@@ -1758,7 +1771,7 @@ class RouteGraphTests(unittest.TestCase):
             connecting_highways_by_node={
                 1: {10: highway_data('path', [])},
             },
-            highway_index={},
+            highway_index=make_highway_index({}),
             sampler=ConstantSampler(),
         )
 
@@ -1927,7 +1940,7 @@ class RouteGraphTests(unittest.TestCase):
                             way_nodes=way_nodes,
                             way_segment_distances=make_way_segment_distances(way_nodes),
                             connecting_highways_by_node=connecting_highways_by_node,
-                            highway_index={},
+                            highway_index=make_highway_index({}),
                             landmark_index=LandmarkIndex(landmark_data or []),
                             settlement_index=None,
                         )
