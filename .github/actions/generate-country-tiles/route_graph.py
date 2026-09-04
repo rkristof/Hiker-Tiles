@@ -221,30 +221,40 @@ class RouteGraph:
             )
         if start_node is None:
             return None
+        finish_nodes = (
+            [finish_node]
+            if finish_node is not None
+            else [node_id for node_id in self._graph if node_id != start_node]
+        ) or [start_node]
+        return self._shortest_complete_traversal_for_finish_nodes(
+            start_node,
+            finish_nodes,
+        )
+
+    def _shortest_complete_traversal_for_finish_nodes(
+        self,
+        start_node,
+        finish_nodes,
+    ):
         graph = self._graph
         if (
             start_node not in graph
-            or (
-                finish_node is not None
-                and finish_node not in graph
-            )
+            or any(finish_node not in graph for finish_node in finish_nodes)
             or not graph
             or not nx.is_connected(graph)
         ):
             return None
 
-        finish_nodes = (
-            [finish_node]
-            if finish_node is not None
-            else [node_id for node_id in graph if node_id != start_node]
-        ) or [start_node]
         shortest_traversal = None
         shortest_distance = float('inf')
+        base_distance = graph.size(weight='weight')
         odd_nodes = [
             node_id
             for node_id, degree in graph.degree()
             if degree % 2
         ]
+        shortest_paths_by_node = {}
+        best_matching = None
 
         for candidate_finish in finish_nodes:
             candidate_odd_nodes = odd_nodes.copy()
@@ -255,48 +265,57 @@ class RouteGraph:
                     candidate_odd_nodes.append(endpoint)
 
             matching_graph = nx.Graph()
-            shortest_paths = {}
             for first_index, first_node in enumerate(candidate_odd_nodes):
-                distances, paths = nx.single_source_dijkstra(
-                    graph,
-                    first_node,
-                    weight='weight',
-                )
+                if first_node not in shortest_paths_by_node:
+                    shortest_paths_by_node[first_node] = nx.single_source_dijkstra(
+                        graph,
+                        first_node,
+                        weight='weight',
+                    )
+                distances, _ = shortest_paths_by_node[first_node]
                 for second_node in candidate_odd_nodes[first_index + 1:]:
                     matching_graph.add_edge(
                         first_node,
                         second_node,
                         weight=distances[second_node],
                     )
-                    shortest_paths[first_node, second_node] = paths[second_node]
-
-            euler_graph = graph.copy()
-            for first_node, second_node in nx.min_weight_matching(
+            matching = nx.min_weight_matching(
                 matching_graph,
                 weight='weight',
-            ):
-                path = shortest_paths.get((first_node, second_node))
-                if path is None:
-                    path = reversed(shortest_paths[second_node, first_node])
-                for path_first, path_second in nx.utils.pairwise(path):
-                    euler_graph.add_edge(
-                        path_first,
-                        path_second,
-                        **self._minimum_edge_data(graph, path_first, path_second),
-                    )
-
-            traversal = [start_node]
-            traversal.extend(
-                second_node
-                for _, second_node in nx.eulerian_path(
-                    euler_graph,
-                    source=start_node,
-                )
             )
-            distance = self.traversal_distance(traversal)
+            distance = base_distance + sum(
+                matching_graph[first_node][second_node]['weight']
+                for first_node, second_node in matching
+            )
             if distance < shortest_distance:
-                shortest_traversal = traversal
                 shortest_distance = distance
+                best_matching = matching
+
+        if best_matching is None:
+            return shortest_traversal
+
+        euler_graph = graph.copy()
+        for first_node, second_node in best_matching:
+            paths = shortest_paths_by_node[first_node][1]
+            path = paths.get(second_node)
+            if path is None:
+                path = reversed(shortest_paths_by_node[second_node][1][first_node])
+            for path_first, path_second in nx.utils.pairwise(path):
+                euler_graph.add_edge(
+                    path_first,
+                    path_second,
+                    **self._minimum_edge_data(graph, path_first, path_second),
+                )
+
+        traversal = [start_node]
+        traversal.extend(
+            second_node
+            for _, second_node in nx.eulerian_path(
+                euler_graph,
+                source=start_node,
+            )
+        )
+        shortest_traversal = traversal
 
         return shortest_traversal
 
@@ -317,19 +336,9 @@ class RouteGraph:
         if not finish_nodes:
             return self.eulerian_traversal(start_node)
 
-        return min(
-            (
-                traversal
-                for finish_node in finish_nodes
-                if (
-                    traversal := self.shortest_complete_traversal(
-                        start_node,
-                        finish_node,
-                    )
-                )
-            ),
-            key=self.traversal_distance,
-            default=None,
+        return self._shortest_complete_traversal_for_finish_nodes(
+            start_node,
+            finish_nodes,
         )
 
     def _create_compressed_graph(self, additional_nodes=()):
