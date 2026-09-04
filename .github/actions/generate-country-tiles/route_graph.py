@@ -467,6 +467,8 @@ class RouteGraph:
         min_graph_distance = self._raw_route_distance * 0.60
         while True:
             first_endpoints = self._degree_one_endpoints()
+            if not first_endpoints:
+                return
             second_endpoints = set(first_endpoints)
             second_endpoints.update(
                 node_id

@@ -613,13 +613,16 @@ def write_route_layers(exporter):
 def export_route_features(collector):
     def snap_relation_endpoints(exporter):
         for route_relation in collector.relations.values():
+            node_roles = route_relation.get('node_roles', {})
+            if not any(node_roles.get(role) for role in ('start', 'end')):
+                continue
             route_nodes = {
                 node_id: point
                 for way_id in route_relation['way_ids']
                 for node_id, point in exporter.way_nodes.get(way_id, ())
             }
             for role in ('start', 'end'):
-                endpoint_nodes = route_relation.get('node_roles', {}).get(role, ())
+                endpoint_nodes = node_roles.get(role, ())
                 if not endpoint_nodes:
                     continue
                 route_relation['node_roles'][role] = [
@@ -805,7 +808,6 @@ def write_route_lines(collector, exporter):
                             'start_point': component_graph._graph.nodes[traversal[0]]['point'],
                             'finish_point': component_graph._graph.nodes[traversal[-1]]['point'],
                             'path': path,
-                            'distance_m': route_distance_m(path),
                         })
 
                     if component_results is None:
@@ -833,13 +835,13 @@ def write_route_lines(collector, exporter):
                 duration_min = None
 
                 if is_short_route:
-                    distance_m = sum(route_distance_m(line) for line in lines)
+                    line_distances = [route_distance_m(line) for line in lines]
+                    distance_m = sum(line_distances)
                     elevation_gain_m = 0
                     elevation_loss_m = 0
                     component_durations = []
                     distance_offset_m = 0
-                    for line in lines:
-                        line_distance_m = route_distance_m(line)
+                    for line, line_distance_m in zip(lines, line_distances):
                         elevation_data = elevation.route_elevation(line)
                         elevation_gain_m += elevation_data['elevation_gain_m']
                         elevation_loss_m += elevation_data['elevation_loss_m']
