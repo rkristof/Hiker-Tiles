@@ -1,9 +1,10 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -33,51 +34,66 @@ struct StoredWay {
     Id id;
     std::uint32_t node_offset;
     std::uint32_t node_count;
-    std::uint16_t highway_type;
+    std::string highway_type;
 };
 
 struct OutputNode {
     Id id;
     double longitude;
     double latitude;
+    std::uint64_t edge_offset;
+    std::uint32_t edge_count;
+    std::uint32_t reserved;
 };
 
-static_assert(sizeof(OutputNode) == 24, "OutputNode format must remain 24 bytes");
+static_assert(sizeof(OutputNode) == 40, "OutputNode format must remain 40 bytes");
 
 struct OutputWay {
     Id id;
-    std::uint64_t node_offset;
     std::uint32_t node_count;
-    std::uint32_t highway_type;
+    std::uint32_t reserved;
+    char highway_type[32];
 };
 
-static_assert(sizeof(OutputWay) == 24, "OutputWay format must remain 24 bytes");
+static_assert(sizeof(OutputWay) == 48, "OutputWay format must remain 48 bytes");
 
-struct OutputType {
-    std::uint32_t offset;
-    std::uint32_t size;
+struct OutputEdge {
+    std::uint32_t target_node_index;
+    std::uint32_t reserved;
+    Id way_id;
+    double distance_m;
 };
 
-static_assert(sizeof(OutputType) == 8, "OutputType format must remain 8 bytes");
+static_assert(sizeof(OutputEdge) == 24, "OutputEdge format must remain 24 bytes");
 
-struct OutputIndexNode {
-    Id id;
+struct OutputSpatialCell {
+    std::uint64_t key;
     std::uint64_t entry_offset;
-    std::uint64_t entry_count;
+    std::uint32_t entry_count;
+    std::uint32_t reserved;
 };
 
-static_assert(sizeof(OutputIndexNode) == 24, "OutputIndexNode format must remain 24 bytes");
+static_assert(sizeof(OutputSpatialCell) == 24, "OutputSpatialCell format must remain 24 bytes");
 
-struct OutputIndexEntry {
-    std::uint32_t way_index;
+struct OutputHeader {
+    char magic[8];
+    std::uint32_t version;
+    std::uint32_t reserved;
+    std::uint64_t node_count;
+    std::uint64_t edge_count;
+    std::uint64_t way_count;
+    std::uint64_t cell_count;
+    std::uint64_t spatial_entry_count;
+};
+
+static_assert(sizeof(OutputHeader) == 56, "OutputHeader format must remain 56 bytes");
+
+constexpr double SPATIAL_CELL_SIZE = 0.01;
+constexpr std::uint32_t OUTPUT_VERSION = 1;
+
+struct SpatialIndexRef {
+    std::uint64_t key;
     std::uint32_t node_index;
-};
-
-static_assert(sizeof(OutputIndexEntry) == 8, "OutputIndexEntry format must remain 8 bytes");
-
-struct OutputIndexRef {
-    Id node_id;
-    OutputIndexEntry entry;
 };
 
 class OnePassCollector : public osmium::handler::Handler {
@@ -102,8 +118,7 @@ public:
     }
 
     void way(osmium::Way& way) {
-        const char* highway_type = way.tags().get_value_by_key("highway");
-        if (highway_type == nullptr) {
+        if (way.tags().get_value_by_key("highway") == nullptr) {
             return;
         }
 
@@ -111,7 +126,7 @@ public:
             way.id(),
             static_cast<std::uint32_t>(way_node_ids_.size()),
             static_cast<std::uint32_t>(way.nodes().size()),
-            highway_type_id(highway_type),
+            way.tags().get_value_by_key("highway"),
         };
 
         bool direct = false;
@@ -159,10 +174,6 @@ public:
         return direct_way_flags_;
     }
 
-    const std::vector<std::string>& highway_types() const noexcept {
-        return highway_types_;
-    }
-
     const std::unordered_set<Id>& excluded_way_ids() const noexcept {
         return excluded_way_ids_;
     }
@@ -180,20 +191,6 @@ private:
             }
         );
         locations_sorted_ = true;
-    }
-
-    std::uint16_t highway_type_id(const char* highway_type) {
-        const auto existing = highway_type_ids_.find(highway_type);
-        if (existing != highway_type_ids_.end()) {
-            return existing->second;
-        }
-        if (highway_types_.size() == std::numeric_limits<std::uint16_t>::max()) {
-            throw std::runtime_error("too many highway types");
-        }
-        const auto type_id = static_cast<std::uint16_t>(highway_types_.size());
-        highway_types_.emplace_back(highway_type);
-        highway_type_ids_.emplace(highway_types_.back(), type_id);
-        return type_id;
     }
 
     void select_ways() {
@@ -245,8 +242,6 @@ private:
     std::unordered_set<Id> route_node_ids_;
     std::unordered_set<Id> excluded_way_ids_;
     std::unordered_set<Id> direct_node_ids_;
-    std::unordered_map<std::string, std::uint16_t> highway_type_ids_;
-    std::vector<std::string> highway_types_;
     std::vector<LocationRecord> locations_;
     std::vector<StoredWay> ways_;
     std::vector<Id> way_node_ids_;
@@ -310,6 +305,32 @@ void write_block(std::ofstream& output, const std::vector<T>& values) {
     }
 }
 
+double haversine_distance_m(const OutputNode& first, const OutputNode& second) {
+    constexpr double EARTH_RADIUS_M = 6371000.0;
+    constexpr double PI = 3.14159265358979323846;
+    const double first_latitude = first.latitude * PI / 180.0;
+    const double second_latitude = second.latitude * PI / 180.0;
+    const double delta_latitude = second_latitude - first_latitude;
+    const double delta_longitude = (second.longitude - first.longitude) * PI / 180.0;
+    const double haversine_term =
+        std::sin(delta_latitude / 2.0) * std::sin(delta_latitude / 2.0)
+        + std::cos(first_latitude) * std::cos(second_latitude)
+        * std::sin(delta_longitude / 2.0) * std::sin(delta_longitude / 2.0);
+    return EARTH_RADIUS_M * 2.0 * std::asin(std::sqrt(haversine_term));
+}
+
+std::uint64_t spatial_cell_key(double longitude, double latitude) {
+    const auto longitude_cell = static_cast<std::int32_t>(
+        std::floor(longitude / SPATIAL_CELL_SIZE)
+    );
+    const auto latitude_cell = static_cast<std::int32_t>(
+        std::floor(latitude / SPATIAL_CELL_SIZE)
+    );
+    return (
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(longitude_cell)) << 32
+    ) | static_cast<std::uint32_t>(latitude_cell);
+}
+
 void write_output(
     const std::string& filename,
     OnePassCollector& collector
@@ -321,13 +342,16 @@ void write_output(
 
     std::vector<OutputWay> output_ways;
     std::vector<OutputNode> output_nodes;
+    std::vector<std::vector<std::uint32_t>> way_node_indexes;
+    std::unordered_map<Id, std::uint32_t> node_indexes;
     output_ways.reserve(collector.selected_way_indices().size());
     for (const std::size_t source_way_index : collector.selected_way_indices()) {
         const auto& way = collector.ways()[source_way_index];
         if (collector.excluded_way_ids().find(way.id) != collector.excluded_way_ids().end()) {
             continue;
         }
-        const auto node_offset = output_nodes.size();
+        std::vector<const LocationRecord*> locations;
+        locations.reserve(way.node_count);
         bool locations_valid = true;
         for (std::uint32_t node_index = 0; node_index < way.node_count; ++node_index) {
             const Id node_id = collector.way_node_ids()[way.node_offset + node_index];
@@ -336,99 +360,168 @@ void write_output(
                 locations_valid = false;
                 break;
             }
+            locations.push_back(location);
+        }
+        if (!locations_valid) {
+            continue;
+        }
+
+        if (way.highway_type.size() >= 32) {
+            throw std::runtime_error("Highway type exceeds native format limit");
+        }
+        OutputWay output_way{};
+        output_way.id = way.id;
+        output_way.node_count = way.node_count;
+        std::memcpy(
+            output_way.highway_type,
+            way.highway_type.data(),
+            way.highway_type.size()
+        );
+        output_ways.push_back(output_way);
+        way_node_indexes.emplace_back();
+        way_node_indexes.back().reserve(way.node_count);
+        for (std::uint32_t node_index = 0; node_index < way.node_count; ++node_index) {
+            const Id node_id = collector.way_node_ids()[way.node_offset + node_index];
+            const auto existing_node = node_indexes.find(node_id);
+            if (existing_node != node_indexes.end()) {
+                way_node_indexes.back().push_back(existing_node->second);
+                continue;
+            }
+
+            const auto node_index_value = static_cast<std::uint32_t>(output_nodes.size());
+            node_indexes.emplace(node_id, node_index_value);
+            const auto* location = locations[node_index];
             output_nodes.push_back({
                 node_id,
                 osmium::Location(location->longitude, location->latitude).lon_without_check(),
                 osmium::Location(location->longitude, location->latitude).lat_without_check(),
+                0,
+                0,
+                0,
             });
+            way_node_indexes.back().push_back(node_index_value);
         }
-        if (!locations_valid) {
-            output_nodes.resize(node_offset);
-            continue;
-        }
-
-        output_ways.push_back({
-            way.id,
-            node_offset,
-            way.node_count,
-            way.highway_type,
-        });
     }
 
-    std::vector<OutputIndexRef> index_refs;
-    index_refs.reserve(output_nodes.size());
+    std::vector<std::uint32_t> sorted_node_indexes(output_nodes.size());
+    std::iota(sorted_node_indexes.begin(), sorted_node_indexes.end(), 0);
+    std::sort(
+        sorted_node_indexes.begin(),
+        sorted_node_indexes.end(),
+        [&output_nodes](const std::uint32_t first, const std::uint32_t second) {
+            return output_nodes[first].id < output_nodes[second].id;
+        }
+    );
+    std::vector<std::uint32_t> remapped_node_indexes(output_nodes.size());
+    std::vector<OutputNode> sorted_nodes;
+    sorted_nodes.reserve(output_nodes.size());
+    for (std::uint32_t sorted_index = 0; sorted_index < sorted_node_indexes.size(); ++sorted_index) {
+        const auto original_index = sorted_node_indexes[sorted_index];
+        remapped_node_indexes[original_index] = sorted_index;
+        sorted_nodes.push_back(output_nodes[original_index]);
+    }
+    output_nodes.swap(sorted_nodes);
+    for (auto& node_indexes_for_way : way_node_indexes) {
+        for (auto& node_index : node_indexes_for_way) {
+            node_index = remapped_node_indexes[node_index];
+        }
+    }
+
+    std::vector<std::vector<OutputEdge>> adjacency(output_nodes.size());
     for (std::size_t way_index = 0; way_index < output_ways.size(); ++way_index) {
         const auto& way = output_ways[way_index];
-        for (std::uint32_t node_index = 0; node_index < way.node_count; ++node_index) {
-            index_refs.push_back({
-                output_nodes[way.node_offset + node_index].id,
-                {
-                    static_cast<std::uint32_t>(way_index),
-                    node_index,
-                },
+        const auto& node_indexes_for_way = way_node_indexes[way_index];
+        for (std::uint32_t node_index = 0; node_index + 1 < way.node_count; ++node_index) {
+            const auto first_node_index = node_indexes_for_way[node_index];
+            const auto second_node_index = node_indexes_for_way[node_index + 1];
+            if (first_node_index == second_node_index) {
+                continue;
+            }
+            const auto distance = haversine_distance_m(
+                output_nodes[first_node_index],
+                output_nodes[second_node_index]
+            );
+            adjacency[first_node_index].push_back({
+                second_node_index,
+                0,
+                way.id,
+                distance,
+            });
+            adjacency[second_node_index].push_back({
+                first_node_index,
+                0,
+                way.id,
+                distance,
             });
         }
     }
+
+    std::vector<OutputEdge> output_edges;
+    output_edges.reserve(output_nodes.size() * 2);
+    for (std::size_t node_index = 0; node_index < output_nodes.size(); ++node_index) {
+        output_nodes[node_index].edge_offset = output_edges.size();
+        output_nodes[node_index].edge_count = adjacency[node_index].size();
+        output_edges.insert(
+            output_edges.end(),
+            adjacency[node_index].begin(),
+            adjacency[node_index].end()
+        );
+    }
+
+    std::vector<SpatialIndexRef> spatial_refs;
+    spatial_refs.reserve(output_nodes.size());
+    for (std::uint32_t node_index = 0; node_index < output_nodes.size(); ++node_index) {
+        spatial_refs.push_back({
+            spatial_cell_key(
+                output_nodes[node_index].longitude,
+                output_nodes[node_index].latitude
+            ),
+            node_index,
+        });
+    }
     std::sort(
-        index_refs.begin(),
-        index_refs.end(),
-        [](const OutputIndexRef& first, const OutputIndexRef& second) {
-            if (first.node_id != second.node_id) {
-                return first.node_id < second.node_id;
+        spatial_refs.begin(),
+        spatial_refs.end(),
+        [](const SpatialIndexRef& first, const SpatialIndexRef& second) {
+            if (first.key != second.key) {
+                return first.key < second.key;
             }
-            return first.entry.way_index < second.entry.way_index;
+            return first.node_index < second.node_index;
         }
     );
 
-    std::vector<OutputIndexNode> index_nodes;
-    index_nodes.reserve(index_refs.size());
-    std::uint64_t index_entry_offset = 0;
-    for (const auto& index_ref : index_refs) {
-        if (index_nodes.empty() || index_nodes.back().id != index_ref.node_id) {
-            index_nodes.push_back({
-                index_ref.node_id,
-                index_entry_offset,
+    std::vector<OutputSpatialCell> spatial_cells;
+    std::vector<std::uint32_t> spatial_entries;
+    spatial_entries.reserve(spatial_refs.size());
+    for (const auto& spatial_ref : spatial_refs) {
+        if (spatial_cells.empty() || spatial_cells.back().key != spatial_ref.key) {
+            spatial_cells.push_back({
+                spatial_ref.key,
+                spatial_entries.size(),
+                0,
                 0,
             });
         }
-        ++index_nodes.back().entry_count;
-        ++index_entry_offset;
+        spatial_entries.push_back(spatial_ref.node_index);
+        ++spatial_cells.back().entry_count;
     }
 
-    std::vector<OutputType> output_types;
-    std::vector<char> type_data;
-    output_types.reserve(collector.highway_types().size());
-    for (const auto& highway_type : collector.highway_types()) {
-        output_types.push_back({
-            static_cast<std::uint32_t>(type_data.size()),
-            static_cast<std::uint32_t>(highway_type.size()),
-        });
-        type_data.insert(type_data.end(), highway_type.begin(), highway_type.end());
-    }
-
-    write_value(output, static_cast<std::uint64_t>(output_ways.size()));
-    write_value(output, static_cast<std::uint64_t>(output_nodes.size()));
-    write_value(output, static_cast<std::uint64_t>(index_nodes.size()));
-    write_value(output, static_cast<std::uint64_t>(index_refs.size()));
-    write_value(output, static_cast<std::uint32_t>(output_types.size()));
-    write_value(output, static_cast<std::uint32_t>(type_data.size()));
-    write_block(output, output_ways);
+    const OutputHeader header{
+        {'H', 'I', 'K', 'E', 'R', 'I', 'D', 'X'},
+        OUTPUT_VERSION,
+        0,
+        output_nodes.size(),
+        output_edges.size(),
+        output_ways.size(),
+        spatial_cells.size(),
+        spatial_entries.size(),
+    };
+    write_value(output, header);
     write_block(output, output_nodes);
-    write_block(output, output_types);
-    if (!type_data.empty()) {
-        output.write(type_data.data(), static_cast<std::streamsize>(type_data.size()));
-    }
-    write_block(output, index_nodes);
-    std::vector<OutputIndexEntry> index_entry_buffer;
-    index_entry_buffer.reserve(65536);
-    for (const auto& index_ref : index_refs) {
-        index_entry_buffer.push_back(index_ref.entry);
-        if (index_entry_buffer.size() == index_entry_buffer.capacity()) {
-            write_block(output, index_entry_buffer);
-            index_entry_buffer.clear();
-        }
-    }
-    write_block(output, index_entry_buffer);
+    write_block(output, output_edges);
+    write_block(output, output_ways);
+    write_block(output, spatial_cells);
+    write_block(output, spatial_entries);
     if (!output) {
         throw std::runtime_error("Unable to finalize collector output");
     }

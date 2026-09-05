@@ -6,7 +6,6 @@ import sys
 import tempfile
 import types
 import unittest
-from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,35 +43,50 @@ def highway_data(highway_type, nodes):
     }
 
 
-class TestHighwayIndex(Mapping):
+class TestHighwayIndex:
     def __init__(self, highways_by_node, highways_by_id):
         self._highways_by_node = highways_by_node
         self._highways_by_id = highways_by_id
-        self._segment_distance_cache = {}
 
-    def __getitem__(self, node_id):
-        return self._highways_by_node[node_id]
+    def contains_node(self, node_id):
+        return node_id in self._highways_by_node
 
-    def __iter__(self):
-        return iter(self._highways_by_node)
+    def neighbors(self, node_id):
+        neighbors = []
+        for way_id, highway in self._highways_by_node.get(node_id, {}).items():
+            nodes = highway['nodes']
+            node_indexes = [
+                node_index
+                for node_index, (candidate_id, _) in enumerate(nodes)
+                if candidate_id == node_id
+            ]
+            for node_index in node_indexes:
+                for target_index in (node_index - 1, node_index + 1):
+                    if not 0 <= target_index < len(nodes):
+                        continue
+                    target_node, target_point = nodes[target_index]
+                    current_point = nodes[node_index][1]
+                    neighbors.append((
+                        way_id,
+                        target_node,
+                        current_point,
+                        target_point,
+                        routes.haversine_distance_m(current_point, target_point),
+                    ))
+        return neighbors
 
-    def __len__(self):
-        return len(self._highways_by_node)
+    def nodes_within_distance(self, point, max_distance):
+        seen = set()
+        for highway in self._highways_by_id.values():
+            for node_id, candidate in highway['nodes']:
+                if node_id in seen:
+                    continue
+                if routes.haversine_distance_m(point, candidate) <= max_distance:
+                    seen.add(node_id)
+                    yield node_id, candidate
 
-    def highway(self, way_id):
-        return self._highways_by_id[way_id]
-
-    def segment_distance(self, way_id, segment_index):
-        cache_key = (way_id, segment_index)
-        if cache_key not in self._segment_distance_cache:
-            highway = self.highway(way_id)
-            first_point = highway['nodes'][segment_index][1]
-            second_point = highway['nodes'][segment_index + 1][1]
-            self._segment_distance_cache[cache_key] = routes.haversine_distance_m(
-                first_point,
-                second_point,
-            )
-        return self._segment_distance_cache[cache_key]
+    def way_node_count(self, way_id):
+        return len(self._highways_by_id[way_id]['nodes'])
 
 
 def make_highway_index(highways_by_node):
@@ -82,16 +96,10 @@ def make_highway_index(highways_by_node):
             unique_highways[way_id] = highway
     indexed_highways = {}
     for way_id, highway in unique_highways.items():
-        nodes = highway['nodes']
-        for node_index, (node_id, _) in enumerate(nodes):
-            indexed_highways.setdefault(node_id, []).append(
-                (way_id, node_index),
-            )
+        for node_id, _ in highway['nodes']:
+            indexed_highways.setdefault(node_id, {})[way_id] = highway
     return TestHighwayIndex(
-        {
-            node_id: tuple(highways)
-            for node_id, highways in indexed_highways.items()
-        },
+        indexed_highways,
         unique_highways,
     )
 
@@ -1580,12 +1588,15 @@ class RouteGraphTests(unittest.TestCase):
         class CountingHighwaysByNode(TestHighwayIndex):
             def __init__(self, highways_by_node):
                 highway_index = make_highway_index(highways_by_node)
-                super().__init__(highway_index, highway_index._highways_by_id)
+                super().__init__(
+                    highway_index._highways_by_node,
+                    highway_index._highways_by_id,
+                )
                 self.queries = []
 
-            def get(self, node_id, default=()):
+            def neighbors(self, node_id):
                 self.queries.append(node_id)
-                return super().get(node_id, default)
+                return super().neighbors(node_id)
 
         relation = {'way_ids': [1], 'node_roles': {}}
         way_nodes = {

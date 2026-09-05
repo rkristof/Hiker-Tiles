@@ -497,7 +497,7 @@ class RouteGraph:
                 and (
                     self._raw_graph.degree(node_id) <= 2
                     or not any(
-                        highway.get('nodes')
+                        highway.get('node_count')
                         for way_id, highway in self._connecting_highways_by_node.get(node_id, {}).items()
                         if way_id not in self._route_way_ids
                     )
@@ -627,13 +627,13 @@ class RouteGraph:
         distances = {first_node: 0}
         predecessors = {}
         queue = [(0, first_node)]
-        if first_node not in self._highway_index:
-            for node_id, highway_nodes in self._highway_index.items():
+        if not self._highway_index.contains_node(first_node):
+            for node_id, point in self._highway_index.nodes_within_distance(
+                first_point,
+                max_distance,
+            ):
                 if node_id in self._raw_graph:
                     continue
-                way_id, node_index = highway_nodes[0]
-                highway = self._highway_index.highway(way_id)
-                point = highway['nodes'][node_index][1]
                 distance = haversine_distance_m(first_point, point)
                 if distance <= max_distance:
                     distances[node_id] = distance
@@ -646,30 +646,26 @@ class RouteGraph:
                 continue
             if current_node == second_node:
                 break
-            for way_id, node_index in self._highway_index.get(current_node, ()):
+            for (
+                way_id,
+                target_node,
+                current_point,
+                target_point,
+                extension_distance,
+            ) in self._highway_index.neighbors(current_node):
                 if way_id in self._route_way_ids:
                     continue
-                highway = self._highway_index.highway(way_id)
-                current_point = highway['nodes'][node_index][1]
-                for target_index in (node_index - 1, node_index + 1):
-                    if not 0 <= target_index < len(highway['nodes']):
-                        continue
-                    target_node, target_point = highway['nodes'][target_index]
-                    extension_distance = self._highway_index.segment_distance(
-                        way_id,
-                        min(node_index, target_index),
-                    )
-                    target_distance = distance + extension_distance
-                    if target_distance > max_distance:
-                        continue
-                    if target_distance >= distances.get(target_node, float('inf')):
-                        continue
-                    distances[target_node] = target_distance
-                    predecessors[target_node] = (
-                        current_node,
-                        [current_point, target_point],
-                    )
-                    heapq.heappush(queue, (target_distance, target_node))
+                target_distance = distance + extension_distance
+                if target_distance > max_distance:
+                    continue
+                if target_distance >= distances.get(target_node, float('inf')):
+                    continue
+                distances[target_node] = target_distance
+                predecessors[target_node] = (
+                    current_node,
+                    [current_point, target_point],
+                )
+                heapq.heappush(queue, (target_distance, target_node))
 
         if second_node not in distances:
             initial_distance = haversine_distance_m(first_point, second_point)

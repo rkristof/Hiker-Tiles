@@ -1,187 +1,171 @@
 import mmap
+import math
 import os
 import struct
 import subprocess
 import tempfile
 from bisect import bisect_left
-from collections.abc import Mapping
 
 import numpy
 
 from utils import haversine_distance_m
 
 
-class NativeNodeSequence:
-    _dtype = numpy.dtype([
-        ('node_id', '<i8'),
-        ('longitude', '<f8'),
-        ('latitude', '<f8'),
-    ])
-
-    def __init__(self, data):
-        self._records = numpy.frombuffer(data, dtype=self._dtype)
-
-    def __len__(self):
-        return len(self._records)
-
-    def __getitem__(self, index):
-        record = self._records[index]
-        return int(record['node_id']), [
-            float(record['longitude']),
-            float(record['latitude']),
-        ]
-
-    def __iter__(self):
-        for index in range(len(self)):
-            yield self[index]
-
-
-class NativeAdjacencyView:
-    def __init__(self, entries, start, end, way_records):
-        self._entries = entries
+class NativeNeighborView:
+    def __init__(self, nodes, edges, start, end, source_index):
+        self._nodes = nodes
+        self._edges = edges
         self._start = start
         self._end = end
-        self._way_records = way_records
+        self._source_index = source_index
 
     def __len__(self):
         return self._end - self._start
 
-    def __getitem__(self, index):
-        if index < 0:
-            index += len(self)
-        if not 0 <= index < len(self):
-            raise IndexError(index)
-        entry = self._entries[self._start + index]
-        return (
-            int(self._way_records[int(entry['way_index'])]['way_id']),
-            int(entry['node_index']),
-        )
-
     def __iter__(self):
-        for entry in self._entries[self._start:self._end]:
+        source = self._nodes[self._source_index]
+        source_point = [float(source['longitude']), float(source['latitude'])]
+        for edge in self._edges[self._start:self._end]:
+            target = self._nodes[int(edge['target_node_index'])]
             yield (
-                int(self._way_records[int(entry['way_index'])]['way_id']),
-                int(entry['node_index']),
+                int(edge['way_id']),
+                int(target['node_id']),
+                source_point,
+                [float(target['longitude']), float(target['latitude'])],
+                float(edge['distance_m']),
             )
 
 
-class NativeWayView(Mapping):
+class NativeHighwayIndex:
+    _magic = b'HIKERIDX'
+    _version = 1
+    _header_format = '<8sIIQQQQQ'
+    _header_size = struct.calcsize(_header_format)
+    _node_dtype = numpy.dtype([
+        ('node_id', '<i8'),
+        ('longitude', '<f8'),
+        ('latitude', '<f8'),
+        ('edge_offset', '<u8'),
+        ('edge_count', '<u4'),
+        ('reserved', '<u4'),
+    ])
+    _edge_dtype = numpy.dtype([
+        ('target_node_index', '<u4'),
+        ('reserved', '<u4'),
+        ('way_id', '<i8'),
+        ('distance_m', '<f8'),
+    ])
+    _way_dtype = numpy.dtype([
+        ('way_id', '<i8'),
+        ('node_count', '<u4'),
+        ('reserved', '<u4'),
+        ('highway_type', 'S32'),
+    ])
+    _cell_dtype = numpy.dtype([
+        ('key', '<u8'),
+        ('entry_offset', '<u8'),
+        ('entry_count', '<u4'),
+        ('reserved', '<u4'),
+    ])
+    _spatial_entry_dtype = numpy.dtype('<u4')
+    _cell_size = 0.01
+
     def __init__(
         self,
-        highway_type,
-        node_data,
-        node_data_offset,
-        node_offset,
-        node_count,
-    ):
-        self._highway_type = highway_type
-        self._node_data = node_data
-        self._node_data_offset = node_data_offset
-        self._node_offset = node_offset
-        self._node_count = node_count
-        self._nodes = None
-
-    def __getitem__(self, key):
-        if key == 'highway_type':
-            return self._highway_type
-        if key == 'nodes':
-            if self._nodes is None:
-                start = self._node_data_offset + self._node_offset * NativeNodeSequence._dtype.itemsize
-                end = start + self._node_count * NativeNodeSequence._dtype.itemsize
-                self._nodes = NativeNodeSequence(self._node_data[start:end])
-            return self._nodes
-        raise KeyError(key)
-
-    def __iter__(self):
-        return iter(('highway_type', 'nodes'))
-
-    def __len__(self):
-        return 2
-
-
-class NativeHighwayIndex(Mapping):
-    def __init__(
-        self,
-        node_records,
-        entries,
+        nodes,
+        edges,
         way_records,
-        node_data,
-        node_data_offset,
-        highway_types,
+        cells,
+        spatial_entries,
     ):
-        self._node_records = node_records
-        self._node_ids = node_records['node_id']
-        self._entries = entries
+        self._nodes = nodes
+        self._node_ids = nodes['node_id']
+        self._edges = edges
         self._way_records = way_records
-        self._node_data = memoryview(node_data)
-        self._node_data_offset = node_data_offset
-        self._highway_types = highway_types
-        self._segment_distance_cache = {}
-        self._way_indexes_by_id = {
-            int(record['way_id']): index
-            for index, record in enumerate(way_records)
+        self._cells = cells
+        self._cell_keys = cells['key']
+        self._spatial_entries = spatial_entries
+        self._way_node_counts = {
+            int(record['way_id']): int(record['node_count'])
+            for record in way_records
         }
-        self._way_views = {}
+        self._way_highway_types = {
+            int(record['way_id']): bytes(record['highway_type']).split(b'\0', 1)[0].decode()
+            for record in way_records
+        }
 
-    def __contains__(self, node_id):
+    def contains_node(self, node_id):
         position = self._node_position(node_id)
         return (
-            position < len(self._node_records)
+            position < len(self._nodes)
             and int(self._node_ids[position]) == node_id
         )
 
-    def __getitem__(self, node_id):
+    def neighbors(self, node_id):
         position = self._node_position(node_id)
         if (
-            position >= len(self._node_records)
+            position >= len(self._nodes)
             or int(self._node_ids[position]) != node_id
         ):
-            raise KeyError(node_id)
-        record = self._node_records[position]
-        start = int(record['entry_offset'])
-        end = start + int(record['entry_count'])
-        return NativeAdjacencyView(
-            self._entries,
-            start,
-            end,
-            self._way_records,
+            return ()
+        node = self._nodes[position]
+        return NativeNeighborView(
+            self._nodes,
+            self._edges,
+            int(node['edge_offset']),
+            int(node['edge_offset']) + int(node['edge_count']),
+            position,
         )
 
     def _node_position(self, node_id):
         return bisect_left(self._node_ids, node_id)
 
-    def __iter__(self):
-        return (int(node_id) for node_id in self._node_records['node_id'])
+    def point(self, node_id):
+        position = self._node_position(node_id)
+        if position >= len(self._nodes) or int(self._node_ids[position]) != node_id:
+            raise KeyError(node_id)
+        node = self._nodes[position]
+        return [float(node['longitude']), float(node['latitude'])]
 
-    def __len__(self):
-        return len(self._node_records)
+    def way_node_count(self, way_id):
+        return self._way_node_counts[way_id]
 
-    def segment_distance(self, way_id, segment_index):
-        cache_key = (way_id, segment_index)
-        if cache_key not in self._segment_distance_cache:
-            highway = self.highway(way_id)
-            first_point = highway['nodes'][segment_index][1]
-            second_point = highway['nodes'][segment_index + 1][1]
-            self._segment_distance_cache[cache_key] = haversine_distance_m(
-                first_point,
-                second_point,
-            )
-        return self._segment_distance_cache[cache_key]
+    def highway_type(self, way_id):
+        return self._way_highway_types[way_id]
 
-    def highway(self, way_id):
-        way_index = self._way_indexes_by_id[way_id]
-        highway = self._way_views.get(way_id)
-        if highway is None:
-            record = self._way_records[way_index]
-            highway = NativeWayView(
-                self._highway_types[int(record['type_index'])],
-                self._node_data,
-                self._node_data_offset,
-                int(record['node_offset']),
-                int(record['node_count']),
-            )
-            self._way_views[way_id] = highway
-        return highway
+    @staticmethod
+    def _cell_key(longitude_cell, latitude_cell):
+        return (
+            ((int(longitude_cell) & 0xffffffff) << 32)
+            | (int(latitude_cell) & 0xffffffff)
+        )
+
+    def nodes_within_distance(self, point, max_distance):
+        latitude_delta = max_distance / 111320.0
+        longitude_scale = max(math.cos(math.radians(point[1])), 1e-12)
+        longitude_delta = max_distance / (111320.0 * longitude_scale)
+        min_longitude_cell = math.floor((point[0] - longitude_delta) / self._cell_size)
+        max_longitude_cell = math.floor((point[0] + longitude_delta) / self._cell_size)
+        min_latitude_cell = math.floor((point[1] - latitude_delta) / self._cell_size)
+        max_latitude_cell = math.floor((point[1] + latitude_delta) / self._cell_size)
+
+        for longitude_cell in range(min_longitude_cell, max_longitude_cell + 1):
+            for latitude_cell in range(min_latitude_cell, max_latitude_cell + 1):
+                key = self._cell_key(longitude_cell, latitude_cell)
+                cell_position = int(numpy.searchsorted(self._cell_keys, key))
+                if (
+                    cell_position >= len(self._cells)
+                    or int(self._cell_keys[cell_position]) != key
+                ):
+                    continue
+                cell = self._cells[cell_position]
+                start = int(cell['entry_offset'])
+                end = start + int(cell['entry_count'])
+                for node_index in self._spatial_entries[start:end]:
+                    node = self._nodes[int(node_index)]
+                    candidate = [float(node['longitude']), float(node['latitude'])]
+                    if haversine_distance_m(point, candidate) <= max_distance:
+                        yield int(node['node_id']), candidate
 
 
 class NativeConnectingHighwaysByNode:
@@ -197,12 +181,15 @@ class NativeConnectingHighwaysByNode:
         if highways is not None:
             return highways
 
-        adjacency = self._highway_index.get(node_id)
+        adjacency = self._highway_index.neighbors(node_id)
         if not adjacency:
             return default
         highways = {}
-        for way_id, _ in adjacency:
-            highways[way_id] = self._highway_index.highway(way_id)
+        for way_id, _, _, _, _ in adjacency:
+            highways[way_id] = {
+                'node_count': self._highway_index.way_node_count(way_id),
+                'highway_type': self._highway_index.highway_type(way_id),
+            }
         self._cache[node_id] = highways
         return highways
 
@@ -210,24 +197,15 @@ class NativeConnectingHighwaysByNode:
 class NativeHighwayCollector:
     """Collect connecting highways with the native libosmium collector."""
 
-    _header_format = '<QQQQII'
+    _magic = b'HIKERIDX'
+    _version = 1
+    _header_format = '<8sIIQQQQQ'
     _header_size = struct.calcsize(_header_format)
-    _way_dtype = numpy.dtype([
-        ('way_id', '<i8'),
-        ('node_offset', '<u8'),
-        ('node_count', '<u4'),
-        ('type_index', '<u4'),
-    ])
-    _type_dtype = numpy.dtype([('offset', '<u4'), ('size', '<u4')])
-    _index_node_dtype = numpy.dtype([
-        ('node_id', '<i8'),
-        ('entry_offset', '<u8'),
-        ('entry_count', '<u8'),
-    ])
-    _index_entry_dtype = numpy.dtype([
-        ('way_index', '<u4'),
-        ('node_index', '<u4'),
-    ])
+    _node_dtype = NativeHighwayIndex._node_dtype
+    _edge_dtype = NativeHighwayIndex._edge_dtype
+    _way_dtype = NativeHighwayIndex._way_dtype
+    _cell_dtype = NativeHighwayIndex._cell_dtype
+    _spatial_entry_dtype = NativeHighwayIndex._spatial_entry_dtype
 
     def __init__(
         self,
@@ -277,67 +255,65 @@ class NativeHighwayCollector:
             raise RuntimeError('Native highway collector output is truncated')
 
         (
-            selected_way_count,
+            magic,
+            version,
+            _,
             node_count,
-            index_node_count,
-            index_entry_count,
-            type_count,
-            type_data_size,
+            edge_count,
+            way_count,
+            cell_count,
+            spatial_entry_count,
         ) = struct.unpack_from(self._header_format, mapping)
+        if magic != self._magic or version != self._version:
+            mapping.close()
+            raise RuntimeError('Unsupported native highway collector output')
 
         offset = self._header_size
+        node_records = numpy.frombuffer(
+            mapping,
+            dtype=self._node_dtype,
+            count=node_count,
+            offset=offset,
+        )
+        offset += node_count * self._node_dtype.itemsize
+        edge_records = numpy.frombuffer(
+            mapping,
+            dtype=self._edge_dtype,
+            count=edge_count,
+            offset=offset,
+        )
+        offset += edge_count * self._edge_dtype.itemsize
         way_records = numpy.frombuffer(
             mapping,
             dtype=self._way_dtype,
-            count=selected_way_count,
+            count=way_count,
             offset=offset,
         )
-        offset += selected_way_count * self._way_dtype.itemsize
-        node_data_offset = offset
-        offset += node_count * NativeNodeSequence._dtype.itemsize
-        type_records = numpy.frombuffer(
+        offset += way_count * self._way_dtype.itemsize
+        cell_records = numpy.frombuffer(
             mapping,
-            dtype=self._type_dtype,
-            count=type_count,
+            dtype=self._cell_dtype,
+            count=cell_count,
             offset=offset,
         )
-        offset += type_count * self._type_dtype.itemsize
-        type_data_offset = offset
-        offset += type_data_size
-        index_nodes = numpy.frombuffer(
+        offset += cell_count * self._cell_dtype.itemsize
+        spatial_entries = numpy.frombuffer(
             mapping,
-            dtype=self._index_node_dtype,
-            count=index_node_count,
+            dtype=self._spatial_entry_dtype,
+            count=spatial_entry_count,
             offset=offset,
         )
-        offset += index_node_count * self._index_node_dtype.itemsize
-        index_entries = numpy.frombuffer(
-            mapping,
-            dtype=self._index_entry_dtype,
-            count=index_entry_count,
-            offset=offset,
-        )
-        offset += index_entry_count * self._index_entry_dtype.itemsize
+        offset += spatial_entry_count * self._spatial_entry_dtype.itemsize
         if len(mapping) < offset:
             mapping.close()
             raise RuntimeError('Native highway collector output is truncated')
 
-        highway_types = [
-            bytes(
-                mapping[
-                    type_data_offset + int(record['offset']):
-                    type_data_offset + int(record['offset']) + int(record['size'])
-                ]
-            ).decode('utf-8')
-            for record in type_records
-        ]
-
         self._native_mapping = mapping
-        self._native_index_node_records = index_nodes
-        self._native_index_entries = index_entries
+        self._native_node_records = node_records
+        self._native_edge_records = edge_records
         self._native_way_records = way_records
-        self._native_node_data_offset = node_data_offset
-        self._native_highway_types = highway_types
+        self._native_cell_records = cell_records
+        self._native_spatial_entries = spatial_entries
         self._native_highway_index = None
 
     def connecting_highways_by_node(self):
@@ -349,11 +325,10 @@ class NativeHighwayCollector:
     def highway_index(self):
         if self._native_highway_index is None:
             self._native_highway_index = NativeHighwayIndex(
-                self._native_index_node_records,
-                self._native_index_entries,
+                self._native_node_records,
+                self._native_edge_records,
                 self._native_way_records,
-                self._native_mapping,
-                self._native_node_data_offset,
-                self._native_highway_types,
+                self._native_cell_records,
+                self._native_spatial_entries,
             )
         return self._native_highway_index
