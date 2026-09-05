@@ -7,19 +7,18 @@ adjacent ways in memory after direct-node closure is complete.
 Adjacency levels count the direct highway level: level 1 selects route-touching
 ways, and each additional level adds highways sharing nodes with the previous
 frontier. Collector always uses three levels. Fixed binary layout keeps selected
-geometry in original PBF way order. Callers may provide excluded way IDs after
-adjacency selection when selected geometry is already available from another source.
+geometry in original PBF way order.
 
-The output is versioned with an `HIKERIDX` magic value and contains contiguous
-sections in this order: canonical nodes, weighted CSR edges, selected way
-metadata, spatial cells, and spatial node postings. Way metadata contains the
-way ID, node count, and fixed-width highway type. Node IDs are sorted. Each edge
-stores its target node position, way ID, and precomputed Haversine distance.
+The output starts with section counts followed by contiguous sections in this
+order: canonical nodes, weighted CSR edges, selected way metadata, spatial
+cells, and spatial node postings. Way metadata contains the way ID, node count,
+and fixed-width highway type. Node IDs are sorted. Each edge stores its target
+node position, way ID, and precomputed Haversine distance.
 Each spatial cell stores a contiguous posting range; cells use a uniform `0.01`
 degree longitude/latitude grid.
 
 The Python adapter memory-maps these sections with NumPy and exposes only the
-explicit route-repair operations `contains_node`, `point`, `neighbors`,
+explicit route-repair operations `contains_node`, `neighbors`,
 `way_node_count`, and `nodes_within_distance`. Dijkstra traversal consumes the
 native edge weights directly. Spatial queries use cell postings followed by
 exact Haversine filtering.
@@ -38,5 +37,4 @@ The production action downloads the Linux AMD64 binary from the
 `native-highway-collector-latest` release. Rebuild and publish it manually with the
 `Build Highway Collector` workflow after changing the native source.
 
-Native node geometry and edge data stay in the memory-mapped file. No legacy
-mapping, lazy way, or node-sequence representation is supported.
+Native node geometry and edge data stay in the memory-mapped file.

@@ -37,10 +37,6 @@ class NativeNeighborView:
 
 
 class NativeHighwayIndex:
-    _magic = b'HIKERIDX'
-    _version = 1
-    _header_format = '<8sIIQQQQQ'
-    _header_size = struct.calcsize(_header_format)
     _node_dtype = numpy.dtype([
         ('node_id', '<i8'),
         ('longitude', '<f8'),
@@ -81,7 +77,6 @@ class NativeHighwayIndex:
         self._nodes = nodes
         self._node_ids = nodes['node_id']
         self._edges = edges
-        self._way_records = way_records
         self._cells = cells
         self._cell_keys = cells['key']
         self._spatial_entries = spatial_entries
@@ -119,13 +114,6 @@ class NativeHighwayIndex:
 
     def _node_position(self, node_id):
         return bisect_left(self._node_ids, node_id)
-
-    def point(self, node_id):
-        position = self._node_position(node_id)
-        if position >= len(self._nodes) or int(self._node_ids[position]) != node_id:
-            raise KeyError(node_id)
-        node = self._nodes[position]
-        return [float(node['longitude']), float(node['latitude'])]
 
     def way_node_count(self, way_id):
         return self._way_node_counts[way_id]
@@ -169,14 +157,11 @@ class NativeHighwayIndex:
 
 
 class NativeConnectingHighwaysByNode:
-    def __init__(self, highway_index, route_node_ids):
+    def __init__(self, highway_index):
         self._highway_index = highway_index
-        self._route_node_ids = route_node_ids
         self._cache = {}
 
     def get(self, node_id, default=None):
-        if node_id not in self._route_node_ids:
-            return default
         highways = self._cache.get(node_id)
         if highways is not None:
             return highways
@@ -197,10 +182,8 @@ class NativeConnectingHighwaysByNode:
 class NativeHighwayCollector:
     """Collect connecting highways with the native libosmium collector."""
 
-    _magic = b'HIKERIDX'
-    _version = 1
-    _header_format = '<8sIIQQQQQ'
-    _header_size = struct.calcsize(_header_format)
+    _counts_format = '<QQQQQ'
+    _counts_size = struct.calcsize(_counts_format)
     _node_dtype = NativeHighwayIndex._node_dtype
     _edge_dtype = NativeHighwayIndex._edge_dtype
     _way_dtype = NativeHighwayIndex._way_dtype
@@ -211,22 +194,18 @@ class NativeHighwayCollector:
         self,
         route_node_ids,
         binary_path=None,
-        excluded_way_ids=(),
     ):
         self._route_node_ids = set(route_node_ids)
-        self._excluded_way_ids = set(excluded_way_ids)
         self._binary_path = binary_path or os.environ.get(
             'HIGHWAY_COLLECTOR_BINARY',
             'native-highway-collector',
         )
         self._native_highway_index = None
-        self._native_mapping = None
 
     def collect_highways(self, filename):
         with tempfile.TemporaryDirectory(prefix='hiker-highway-') as directory:
             directory = os.path.abspath(directory)
             route_nodes_path = os.path.join(directory, 'route-node-ids.txt')
-            excluded_ways_path = os.path.join(directory, 'excluded-way-ids.txt')
             output_path = os.path.join(directory, 'highways.bin')
             with open(route_nodes_path, 'w') as route_nodes_file:
                 route_nodes_file.write(
@@ -238,37 +217,36 @@ class NativeHighwayCollector:
                 '--route-nodes', route_nodes_path,
                 '--output', output_path,
             ]
-            if self._excluded_way_ids:
-                with open(excluded_ways_path, 'w') as excluded_ways_file:
-                    excluded_ways_file.write(
-                        ''.join(f'{way_id}\n' for way_id in sorted(self._excluded_way_ids))
-                    )
-                command.extend(['--exclude-way-ids', excluded_ways_path])
             subprocess.run(command, check=True)
             self._read_output(output_path)
 
     def _read_output(self, filename):
         with open(filename, 'rb') as output:
             mapping = mmap.mmap(output.fileno(), 0, access=mmap.ACCESS_READ)
-        if len(mapping) < self._header_size:
+        if len(mapping) < self._counts_size:
             mapping.close()
             raise RuntimeError('Native highway collector output is truncated')
 
         (
-            magic,
-            version,
-            _,
             node_count,
             edge_count,
             way_count,
             cell_count,
             spatial_entry_count,
-        ) = struct.unpack_from(self._header_format, mapping)
-        if magic != self._magic or version != self._version:
-            mapping.close()
-            raise RuntimeError('Unsupported native highway collector output')
+        ) = struct.unpack_from(self._counts_format, mapping)
 
-        offset = self._header_size
+        expected_size = self._counts_size + (
+            node_count * self._node_dtype.itemsize
+            + edge_count * self._edge_dtype.itemsize
+            + way_count * self._way_dtype.itemsize
+            + cell_count * self._cell_dtype.itemsize
+            + spatial_entry_count * self._spatial_entry_dtype.itemsize
+        )
+        if len(mapping) < expected_size:
+            mapping.close()
+            raise RuntimeError('Native highway collector output is truncated')
+
+        offset = self._counts_size
         node_records = numpy.frombuffer(
             mapping,
             dtype=self._node_dtype,
@@ -304,11 +282,6 @@ class NativeHighwayCollector:
             offset=offset,
         )
         offset += spatial_entry_count * self._spatial_entry_dtype.itemsize
-        if len(mapping) < offset:
-            mapping.close()
-            raise RuntimeError('Native highway collector output is truncated')
-
-        self._native_mapping = mapping
         self._native_node_records = node_records
         self._native_edge_records = edge_records
         self._native_way_records = way_records
@@ -317,10 +290,7 @@ class NativeHighwayCollector:
         self._native_highway_index = None
 
     def connecting_highways_by_node(self):
-        return NativeConnectingHighwaysByNode(
-            self.highway_index(),
-            self._route_node_ids,
-        )
+        return NativeConnectingHighwaysByNode(self.highway_index())
 
     def highway_index(self):
         if self._native_highway_index is None:

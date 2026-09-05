@@ -75,10 +75,7 @@ struct OutputSpatialCell {
 
 static_assert(sizeof(OutputSpatialCell) == 24, "OutputSpatialCell format must remain 24 bytes");
 
-struct OutputHeader {
-    char magic[8];
-    std::uint32_t version;
-    std::uint32_t reserved;
+struct OutputCounts {
     std::uint64_t node_count;
     std::uint64_t edge_count;
     std::uint64_t way_count;
@@ -86,10 +83,9 @@ struct OutputHeader {
     std::uint64_t spatial_entry_count;
 };
 
-static_assert(sizeof(OutputHeader) == 56, "OutputHeader format must remain 56 bytes");
+static_assert(sizeof(OutputCounts) == 40, "OutputCounts format must remain 40 bytes");
 
 constexpr double SPATIAL_CELL_SIZE = 0.01;
-constexpr std::uint32_t OUTPUT_VERSION = 1;
 
 struct SpatialIndexRef {
     std::uint64_t key;
@@ -99,11 +95,9 @@ struct SpatialIndexRef {
 class OnePassCollector : public osmium::handler::Handler {
 public:
     OnePassCollector(
-        std::unordered_set<Id> route_node_ids,
-        std::unordered_set<Id> excluded_way_ids
+        std::unordered_set<Id> route_node_ids
     ) :
-        route_node_ids_(std::move(route_node_ids)),
-        excluded_way_ids_(std::move(excluded_way_ids)) {}
+        route_node_ids_(std::move(route_node_ids)) {}
 
     void node(const osmium::Node& node) {
         const auto location = node.location();
@@ -162,20 +156,8 @@ public:
         return locations_;
     }
 
-    const std::unordered_set<Id>& direct_node_ids() const noexcept {
-        return direct_node_ids_;
-    }
-
     const std::vector<std::size_t>& selected_way_indices() const noexcept {
         return selected_way_indices_;
-    }
-
-    const std::vector<std::uint8_t>& direct_way_flags() const noexcept {
-        return direct_way_flags_;
-    }
-
-    const std::unordered_set<Id>& excluded_way_ids() const noexcept {
-        return excluded_way_ids_;
     }
 
 private:
@@ -194,13 +176,13 @@ private:
     }
 
     void select_ways() {
-        selected_way_flags_.assign(ways_.size(), 0);
+        std::vector<std::uint8_t> selected_way_flags(ways_.size(), 0);
         selected_way_indices_.clear();
         selected_way_indices_.reserve(ways_.size());
 
         for (std::size_t way_index = 0; way_index < ways_.size(); ++way_index) {
             if (direct_way_flags_[way_index] != 0) {
-                selected_way_flags_[way_index] = 1;
+                selected_way_flags[way_index] = 1;
             }
         }
 
@@ -208,7 +190,7 @@ private:
         for (std::uint32_t level = 1; level < ADJACENCY_LEVELS && !frontier.empty(); ++level) {
             std::unordered_set<Id> next_frontier;
             for (std::size_t way_index = 0; way_index < ways_.size(); ++way_index) {
-                if (selected_way_flags_[way_index] != 0) {
+                if (selected_way_flags[way_index] != 0) {
                     continue;
                 }
                 const auto& way = ways_[way_index];
@@ -223,7 +205,7 @@ private:
                     continue;
                 }
 
-                selected_way_flags_[way_index] = 1;
+                selected_way_flags[way_index] = 1;
                 next_frontier.insert(
                     way_node_ids_.begin() + way.node_offset,
                     way_node_ids_.begin() + way.node_offset + way.node_count
@@ -233,20 +215,18 @@ private:
         }
 
         for (std::size_t way_index = 0; way_index < ways_.size(); ++way_index) {
-            if (selected_way_flags_[way_index] != 0) {
+            if (selected_way_flags[way_index] != 0) {
                 selected_way_indices_.push_back(way_index);
             }
         }
     }
 
     std::unordered_set<Id> route_node_ids_;
-    std::unordered_set<Id> excluded_way_ids_;
     std::unordered_set<Id> direct_node_ids_;
     std::vector<LocationRecord> locations_;
     std::vector<StoredWay> ways_;
     std::vector<Id> way_node_ids_;
     std::vector<std::uint8_t> direct_way_flags_;
-    std::vector<std::uint8_t> selected_way_flags_;
     std::vector<std::size_t> selected_way_indices_;
     bool locations_sorted_ = true;
 };
@@ -347,9 +327,6 @@ void write_output(
     output_ways.reserve(collector.selected_way_indices().size());
     for (const std::size_t source_way_index : collector.selected_way_indices()) {
         const auto& way = collector.ways()[source_way_index];
-        if (collector.excluded_way_ids().find(way.id) != collector.excluded_way_ids().end()) {
-            continue;
-        }
         std::vector<const LocationRecord*> locations;
         locations.reserve(way.node_count);
         bool locations_valid = true;
@@ -506,17 +483,14 @@ void write_output(
         ++spatial_cells.back().entry_count;
     }
 
-    const OutputHeader header{
-        {'H', 'I', 'K', 'E', 'R', 'I', 'D', 'X'},
-        OUTPUT_VERSION,
-        0,
+    const OutputCounts counts{
         output_nodes.size(),
         output_edges.size(),
         output_ways.size(),
         spatial_cells.size(),
         spatial_entries.size(),
     };
-    write_value(output, header);
+    write_value(output, counts);
     write_block(output, output_nodes);
     write_block(output, output_edges);
     write_block(output, output_ways);
@@ -531,8 +505,8 @@ void write_output(
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 7 && argc != 9) {
-        std::cerr << "Usage: native-highway-collector --input FILE --route-nodes FILE --output FILE [--exclude-way-ids FILE]\n";
+    if (argc != 7) {
+        std::cerr << "Usage: native-highway-collector --input FILE --route-nodes FILE --output FILE\n";
         return 2;
     }
 
@@ -540,7 +514,6 @@ int main(int argc, char** argv) {
         std::string input_filename;
         std::string route_nodes_filename;
         std::string output_filename;
-        std::string excluded_way_ids_filename;
         for (int index = 1; index < argc; index += 2) {
             const std::string option = argv[index];
             const std::string value = argv[index + 1];
@@ -550,8 +523,6 @@ int main(int argc, char** argv) {
                 route_nodes_filename = value;
             } else if (option == "--output") {
                 output_filename = value;
-            } else if (option == "--exclude-way-ids") {
-                excluded_way_ids_filename = value;
             } else {
                 throw std::invalid_argument("unknown option: " + option);
             }
@@ -560,13 +531,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("input, route nodes, and output are required");
         }
         auto route_node_ids = read_ids(route_nodes_filename);
-        auto excluded_way_ids = excluded_way_ids_filename.empty()
-            ? std::unordered_set<Id>()
-            : read_ids(excluded_way_ids_filename);
-        OnePassCollector collector(
-            std::move(route_node_ids),
-            std::move(excluded_way_ids)
-        );
+        OnePassCollector collector(std::move(route_node_ids));
 
         osmium::io::Reader reader(
             input_filename,
