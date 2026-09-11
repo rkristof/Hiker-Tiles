@@ -1,0 +1,66 @@
+name: Build Tippecanoe
+
+on:
+  workflow_dispatch:
+    inputs:
+      tippecanoe_version:
+        description: Tippecanoe source tag to build
+        required: true
+        default: '2.79.0'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ \
+            make \
+            libsqlite3-dev \
+            zlib1g-dev
+
+      - name: Build Tippecanoe
+        env:
+          TIPPECANOE_VERSION: ${{ inputs.tippecanoe_version }}
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/felt/tippecanoe/archive/refs/tags/${TIPPECANOE_VERSION}.tar.gz" \
+            -o /tmp/tippecanoe.tar.gz
+          tar -xzf /tmp/tippecanoe.tar.gz -C /tmp
+          make -C "/tmp/tippecanoe-${TIPPECANOE_VERSION}" -j"$(nproc)"
+          "/tmp/tippecanoe-${TIPPECANOE_VERSION}/tippecanoe" --version
+          tar -czf /tmp/tippecanoe-linux-amd64.tar.gz \
+            -C "/tmp/tippecanoe-${TIPPECANOE_VERSION}" \
+            tippecanoe
+
+      - name: Publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TIPPECANOE_VERSION: ${{ inputs.tippecanoe_version }}
+        run: |
+          NOTES="Pre-built Tippecanoe binary for ubuntu-24.04 (amd64).
+          Tippecanoe source version: ${TIPPECANOE_VERSION}
+          Source: https://github.com/felt/tippecanoe
+          Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if gh release view tippecanoe-latest --repo ${{ github.repository }} &>/dev/null; then
+            gh release upload tippecanoe-latest /tmp/tippecanoe-linux-amd64.tar.gz \
+              --clobber \
+              --repo ${{ github.repository }}
+            gh release edit tippecanoe-latest \
+              --notes "$NOTES" \
+              --repo ${{ github.repository }}
+          else
+            gh release create tippecanoe-latest \
+              --title "Tippecanoe (Latest)" \
+              --notes "$NOTES" \
+              --repo ${{ github.repository }} \
+              /tmp/tippecanoe-linux-amd64.tar.gz
+          fi
