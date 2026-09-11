@@ -1,0 +1,270 @@
+name: Generate country tiles
+description: >
+  Generates base and hiking vector tiles for one Geofabrik country and publishes
+  the resulting archive to the tiles-latest GitHub Release.
+
+inputs:
+  country:
+    description: Geofabrik country ID.
+    required: true
+  symbol_tag:
+    description: OSM tag key used to read route symbols (osmc:symbol, jel, or kct).
+    required: false
+    default: osmc:symbol
+  routes_token:
+    description: Token with read access to the Hiker-Routes repository.
+    required: true
+  tile_password:
+    description: Password used to encrypt the generated tile archive.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Fix apt cache permissions
+      shell: bash
+      run: sudo mkdir -p /var/cache/apt/archives && sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+    - name: Cache apt packages
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives/*.deb
+        key: apt-${{ runner.os }}-packages-v1
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-packages-v1
+
+    - name: Download OSM extract
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        echo "Downloading ${COUNTRY} OSM extract from Geofabrik"
+        wget -q \
+          "https://download.geofabrik.de/europe/${COUNTRY}-latest.osm.pbf" \
+          -O tiles-latest.osm.pbf
+        echo "Downloaded: $(du -sh tiles-latest.osm.pbf | cut -f1)"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g libbz2-1.0 libexpat1 liblz4-1
+        pip3 install networkx numpy osmium rasterio
+
+    - name: Download native highway collector
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release download native-highway-collector-latest \
+          --repo ${{ github.repository }} \
+          --pattern 'native-highway-collector-linux-amd64.tar.gz' \
+          --output /tmp/native-highway-collector.tar.gz
+        sudo tar -xzf /tmp/native-highway-collector.tar.gz -C /usr/local/bin
+        sudo chmod 0755 /usr/local/bin/native-highway-collector
+        rm /tmp/native-highway-collector.tar.gz
+
+    - name: Generate base map tiles
+      uses: ./.github/actions/generate-base-tiles
+      with:
+        country: ${{ inputs.country }}
+
+    - name: Download elevation tiles
+      uses: ./.github/actions/download-elevation-tiles
+      with:
+        country: ${{ inputs.country }}
+        output_directory: elevation-tiles
+
+    - name: Checkout route extractor
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/Hiker-Routes
+        ref: main
+        token: ${{ inputs.routes_token }}
+        path: .hiker-routes
+        persist-credentials: false
+
+    - name: Extract hiking routes with route attributes to GeoJSON
+      shell: bash
+      env:
+        ELEVATION_DIRECTORY: elevation-tiles
+        COUNTRY: ${{ inputs.country }}
+        SYMBOL_TAG: ${{ inputs.symbol_tag }}
+      run: |
+        # Keep route geometry and access highways in separate files. The route
+        # Native collector retains geometry through three highway adjacency levels.
+        osmium tags-filter tiles-latest.osm.pbf \
+          r/route=hiking r/route=foot r/route=mtb \
+          n/checkpoint=hiking \
+          n/place=city n/place=town n/place=village n/place=hamlet \
+          n/natural=peak n/natural=cave_entrance n/natural=volcano \
+          -o tiles-filtered.osm.pbf
+        osmium tags-filter tiles-latest.osm.pbf w/highway \
+          -o highways-filtered.osm.pbf
+        echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
+        python3 .hiker-routes/extract_hiking_routes.py
+        rm -rf .hiker-routes tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+        echo "Natural points: $(wc -l < natural-points.geojsonseq)"
+        echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
+        echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"
+        echo "Route lines: $(wc -l < hiking-routes-interaction.geojsonseq)"
+        echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
+
+    - name: Download Tippecanoe binary
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release download tippecanoe-latest \
+          --repo ${{ github.repository }} \
+          --pattern 'tippecanoe-linux-amd64.tar.gz' \
+          --output tippecanoe.tar.gz
+        tar -xzf tippecanoe.tar.gz
+        sudo install -m 0755 tippecanoe /usr/local/bin/tippecanoe
+        rm tippecanoe tippecanoe.tar.gz
+        tippecanoe --version
+
+    - name: Generate vector tiles with Tippecanoe
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        tippecanoe \
+          --output hiking.mbtiles \
+          --minimum-zoom 5 \
+          --maximum-zoom 13 \
+          --low-detail 9 \
+          --simplification 0.5 \
+          --reorder \
+          --hilbert \
+          --coalesce \
+          --single-precision \
+          --no-tile-size-limit \
+          --force \
+          --named-layer=natural_points:natural-points.geojsonseq \
+          --named-layer=hiking_routes_interaction:hiking-routes-interaction.geojsonseq \
+          --named-layer=hiking_routes:hiking-routes.geojsonseq \
+          --named-layer=hiking_symbols:hiking-symbols.geojsonseq
+        mv hiking.mbtiles "${COUNTRY}-hiking.mbtiles"
+        echo "Hiking: $(du -sh "${COUNTRY}-hiking.mbtiles" | cut -f1)"
+        rm natural-points.geojsonseq \
+          hiking-routes.geojsonseq \
+          hiking-symbols.geojsonseq \
+          hiking-routes-interaction.geojsonseq
+        cp base.mbtiles "${COUNTRY}-base.mbtiles"
+        echo "Base: $(du -sh "${COUNTRY}-base.mbtiles" | cut -f1)"
+
+    - name: Inject routes metadata table into MBTiles
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        python3 << 'PYEOF'
+        import json
+        import os
+        import sqlite3
+
+        with open('routes-meta.json') as f:
+            routes = json.load(f)
+        filename = f'{os.environ["COUNTRY"]}-hiking.mbtiles'
+        conn = sqlite3.connect(filename)
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS routes (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                name_int TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL DEFAULT '',
+                network TEXT NOT NULL DEFAULT '',
+                route_type TEXT NOT NULL DEFAULT '',
+                min_lon REAL,
+                min_lat REAL,
+                max_lon REAL,
+                max_lat REAL,
+                distance_m INTEGER,
+                elevation_gain_m INTEGER,
+                elevation_loss_m INTEGER,
+                elevation_profile TEXT NOT NULL DEFAULT '[]',
+                duration_min INTEGER,
+                start_lon REAL,
+                start_lat REAL,
+                finish_lon REAL,
+                finish_lat REAL
+            )
+        ''')
+        conn.executemany(
+            '''
+            INSERT OR REPLACE INTO routes (
+                id, name, name_int, symbol, network, route_type,
+                min_lon, min_lat, max_lon, max_lat, distance_m,
+                elevation_gain_m, elevation_loss_m, elevation_profile, duration_min,
+                start_lon, start_lat, finish_lon, finish_lat
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ''',
+            [(r['id'], r['name'], r['name_int'], r['symbol'], r['network'], r['type'],
+              r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
+              r['elevation_gain_m'], r['elevation_loss_m'],
+              json.dumps(r['elevation_profile'], separators=(',', ':')),
+              r['duration_min'],
+              r['start_lon'], r['start_lat'], r['finish_lon'], r['finish_lat'])
+             for r in routes]
+        )
+        conn.commit()
+        conn.execute('VACUUM')
+        conn.close()
+        print(f'Injected {len(routes)} routes into metadata table')
+        PYEOF
+        rm routes-meta.json
+
+    - name: Generate and embed OSMC symbol images
+      uses: ./.github/actions/embed-osmc-symbols
+      with:
+        filename: ${{ inputs.country }}-hiking.mbtiles
+        embed_kct_symbols: ${{ inputs.symbol_tag == 'kct' }}
+        embed_jel_symbols: ${{ inputs.symbol_tag == 'jel' }}
+
+    - name: Compress tiles
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: tar -czf "${COUNTRY}-tiles.tar.gz" "${COUNTRY}-base.mbtiles" "${COUNTRY}-hiking.mbtiles"
+
+    - name: Encrypt tiles archive
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+        TILES_PASSWORD: ${{ inputs.tile_password }}
+      run: |
+        openssl enc -aes-256-cbc \
+          -pbkdf2 \
+          -iter 600000 \
+          -md sha256 \
+          -salt \
+          -saltlen 16 \
+          -pass env:TILES_PASSWORD \
+          -in "${COUNTRY}-tiles.tar.gz" \
+          -out "${COUNTRY}-tiles.tar.gz.enc"
+        rm "${COUNTRY}-tiles.tar.gz"
+
+    - name: Publish to GitHub Releases
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        NOTES="Auto-generated map tiles from OpenStreetMap data (ODbL).
+        Source: Geofabrik extracts
+        Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+        if gh release view tiles-latest &>/dev/null; then
+          gh release upload tiles-latest "${COUNTRY}-tiles.tar.gz.enc" --clobber
+          gh release edit tiles-latest --notes "$NOTES"
+        else
+          gh release create tiles-latest \
+            --title "Tiles (Latest)" \
+            --notes "$NOTES" \
+            "${COUNTRY}-tiles.tar.gz.enc"
+        fi
