@@ -1,0 +1,64 @@
+name: Build Highway Collector
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            g++ \
+            libbz2-dev \
+            libexpat1-dev \
+            liblz4-dev \
+            libosmium2-dev \
+            libprotozero-dev \
+            zlib1g-dev
+
+      - name: Build native highway collector
+        run: |
+          cmake -S .github/actions/native-highway-collector \
+            -B /tmp/native-highway-collector-build \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/native-highway-collector-build --parallel "$(nproc)"
+          /tmp/native-highway-collector-build/native-highway-collector \
+            --help >/dev/null 2>&1 || test $? -eq 2
+          tar -czf /tmp/native-highway-collector-linux-amd64.tar.gz \
+            -C /tmp/native-highway-collector-build \
+            native-highway-collector
+
+      - name: Publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES="Pre-built native highway collector for ubuntu-24.04 (amd64).
+          Built from repository source at ${GITHUB_SHA}.
+          Runtime dependencies: libbz2-1.0, libexpat1, liblz4-1, zlib1g.
+          Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if gh release view native-highway-collector-latest --repo ${{ github.repository }} &>/dev/null; then
+            gh release upload native-highway-collector-latest /tmp/native-highway-collector-linux-amd64.tar.gz \
+              --clobber \
+              --repo ${{ github.repository }}
+            gh release edit native-highway-collector-latest \
+              --notes "$NOTES" \
+              --repo ${{ github.repository }}
+          else
+            gh release create native-highway-collector-latest \
+              --title "Highway Collector (Latest)" \
+              --notes "$NOTES" \
+              --repo ${{ github.repository }} \
+              /tmp/native-highway-collector-linux-amd64.tar.gz
+          fi
