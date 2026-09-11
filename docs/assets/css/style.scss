@@ -1,0 +1,9 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+.container-lg > h1:first-child,
+.container-lg > .footer {
+  display: none !important;
+}
