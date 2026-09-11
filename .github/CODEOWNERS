@@ -1,0 +1,6 @@
+# Require owner review for GitHub workflows and local actions
+/.github/workflows/** @rkristof
+/.github/actions/** @rkristof
+
+# Protect the ownership rules themselves
+/.github/CODEOWNERS @rkristof
