@@ -1,0 +1,114 @@
+{
+    "layers": {
+        "place_labels": {
+            "minzoom": 6,
+            "maxzoom": 13,
+            "z_order_ascending": false,
+            "combine_lines_below": 14
+        },
+        "streets": {
+            "minzoom": 13,
+            "maxzoom": 13,
+            "simplify_below": 14,
+            "simplify_level": 0.00002,
+            "combine_lines_below": 14
+        },
+        "streets_med": {
+            "minzoom": 9,
+            "maxzoom": 12,
+            "simplify_below": 14,
+            "simplify_level": 0.000075,
+            "combine_lines_below": 14,
+            "write_to": "streets"
+        },
+        "streets_low": {
+            "minzoom": 5,
+            "maxzoom": 8,
+            "simplify_below": 14,
+            "simplify_level": 0.000075,
+            "combine_lines_below": 14,
+            "write_to": "streets"
+        },
+        "water_polygons": {
+            "minzoom": 5,
+            "maxzoom": 13,
+            "simplify_below": 14,
+            "simplify_level": 0.00015,
+            "filter_below": 14,
+            "filter_area": 0.5,
+            "combine_lines_below": 14
+        },
+        "land": {
+            "minzoom": 0,
+            "maxzoom": 13
+        },
+        "residential": {
+            "minzoom": 8,
+            "maxzoom": 13,
+            "simplify_below": 14,
+            "simplify_level": 0.00002,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.2,
+            "combine_lines_below": 14,
+            "write_to": "land"
+        },
+        "natural_low": {
+            "minzoom": 0,
+            "maxzoom": 7,
+            "source": "natural-low.geojsonseq",
+            "source_columns": ["kind"],
+            "simplify_below": 13,
+            "simplify_level": 0.00001,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14,
+            "write_to": "land"
+        },
+        "natural": {
+            "minzoom": 8,
+            "maxzoom": 13,
+            "simplify_below": 13,
+            "simplify_level": 0.0003,
+            "simplify_ratio": 1.5,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14,
+            "write_to": "land"
+        },
+        "protected_area": {
+            "minzoom": 7,
+            "maxzoom": 13,
+            "simplify_below": 13,
+            "simplify_level": 0.0003,
+            "simplify_ratio": 1.5,
+            "simplify_algorithm": "visvalingam",
+            "filter_below": 15,
+            "filter_area": 0.1,
+            "combine_lines_below": 14
+        },
+        "pois": {
+            "minzoom": 13,
+            "maxzoom": 13,
+            "combine_lines_below": 14
+        }
+    },
+    "settings": {
+        "minzoom": 0,
+        "maxzoom": 13,
+        "basezoom": 13,
+        "include_ids": false,
+        "name": "Shortbread base tiles",
+        "version": "1.0",
+        "description": "Country base tiles using a simple vector tiles schema",
+        "compress": "deflate",
+        "filemetadata": {
+            "tilejson": "2.0.0",
+            "scheme": "xyz",
+            "type": "baselayer",
+            "format": "pbf"
+        }
+    }
+}
