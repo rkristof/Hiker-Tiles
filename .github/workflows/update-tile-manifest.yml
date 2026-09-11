@@ -1,0 +1,49 @@
+name: Update tile release manifest
+
+on:
+  repository_dispatch:
+    types: [update-release-manifest]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tile-release-manifest
+  cancel-in-progress: false
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build manifest from release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ vars.VERSION }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Invalid tile release version"
+            exit 1
+          fi
+
+          RELEASE_TAG="tiles-${VERSION}"
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            > release-assets.json
+
+          jq --arg version "$VERSION" '
+            add
+            | map(select(.name != "manifest.json"))
+            | if length == 0 then
+                error("Tile release contains no assets")
+              elif any(.[]; ((.digest // "") | startswith("sha256:") | not)) then
+                error("Tile release asset is missing a SHA-256 digest")
+              else
+                {
+                  version: $version,
+                  assets: (map({key: .name, value: .digest}) | from_entries)
+                }
+              end
+          ' release-assets.json > manifest.json
+
+          gh release upload "$RELEASE_TAG" manifest.json --clobber --repo "$GITHUB_REPOSITORY"
