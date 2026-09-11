@@ -1,0 +1,147 @@
+name: Generate World Base Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lua5.3 \
+            liblua5.3-dev \
+            libboost-filesystem-dev \
+            libboost-program-options-dev \
+            libboost-system-dev \
+            libshp-dev \
+            libsqlite3-dev \
+            gdal-bin \
+            unzip
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install mapshaper
+        run: npm install -g mapshaper
+
+      - name: Download Tilemaker binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download tilemaker-latest \
+            --repo ${{ github.repository }} \
+            --pattern 'tilemaker-linux-amd64.tar.gz' \
+            --output tilemaker.tar.gz
+          tar -xzf tilemaker.tar.gz
+          sudo mv tilemaker /usr/local/bin/
+          rm tilemaker.tar.gz
+
+      - name: Download boundaries GeoJSON
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download world-base-latest \
+            --repo ${{ github.repository }} \
+            --pattern 'boundaries.geojson.zip' \
+            --output boundaries.geojson.zip
+
+      - name: Build boundaries GeoJSONSeq
+        run: |
+          unzip -q boundaries.geojson.zip
+          rm boundaries.geojson.zip
+          # Get line strings from polygons
+          mapshaper boundaries.geojson \
+          -clean snap-interval=0.0003 gap-fill-area=2000 \
+          -innerlines \
+          -explode \
+          -each 'boundary=true' \
+          -o boundaries.geojsonseq format=geojson ndjson
+          echo "Boundary line features: $(wc -l < boundaries.geojsonseq)"
+
+      - name: Download Natural Earth labels
+        run: |
+          # Curated country label placement points
+          wget -q -L "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip" -O ne-labels.zip
+
+      - name: Build labels GeoJSON
+        run: |
+          unzip -q ne-labels.zip -d ne-labels-raw/
+          rm ne-labels.zip
+          SHP=$(find ne-labels-raw/ -name "*.shp" | head -1)
+          # Keep only the NAME field — the only attribute read by HikerMapView
+          ogr2ogr -f GeoJSONSeq  -dialect SQLite -sql "SELECT MakePoint(LABEL_X, LABEL_Y, 4326) AS geometry, NAME FROM ne_110m_admin_0_countries" labels.geojsonseq "$SHP"
+          rm -rf ne-labels-raw/
+          echo "Label point features: $(wc -l < labels.geojsonseq)"
+
+      - name: Download OSM land polygons
+        run: |
+          wget -q https://osmdata.openstreetmap.de/download/land-polygons-split-4326.zip -O land-polygons.zip
+          echo "Downloaded: $(du -sh land-polygons.zip | cut -f1)"
+
+      - name: Build land GeoJSON
+        run: |
+          unzip -q land-polygons.zip -d land-raw/
+          rm land-polygons.zip
+          # Locate the shapefile regardless of the exact directory name in the zip
+          SHP=$(find land-raw/ -name "*.shp" | head -1)
+          echo "Converting: $SHP"
+
+          export NODE_OPTIONS="--max-old-space-size=12288"
+          mapshaper "$SHP" \
+          -filter-fields \
+          -filter-islands min-area=25000m2 \
+          -simplify interval=5 visvalingam keep-shapes \
+          -dissolve \
+          -explode \
+          -clean \
+          -o land_dissolved.fgb format=flatgeobuf drop-table
+          
+          ogr2ogr -f GeoJSONSeq land.geojsonseq land_dissolved.fgb
+          rm -rf land-raw/
+          rm land_dissolved.fgb
+          echo "Land polygon features: $(wc -l < land.geojsonseq)"
+
+      - name: Generate tiles
+        shell: bash
+        run: |
+          tilemaker \
+          --config .github/actions/generate-world-base/config.json \
+          --process .github/actions/generate-world-base/process.lua \
+          --bbox -180,-90,180,90 \
+          --output world-base.mbtiles
+
+      - name: Publish to GitHub Releases
+        run: |
+          gzip -9 world-base.mbtiles
+          NOTES="World base tiles built from OSM land polygons and Natural Earth data.
+          Sources:
+            OSM Land Polygons (ODbL): https://osmdata.openstreetmap.de/data/land-polygons.html
+            Natural Earth 110m cultural (public domain): https://www.naturalearthdata.com/downloads/110m-cultural-vectors/
+          Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if gh release view world-base-latest &>/dev/null; then
+            gh release upload world-base-latest world-base.mbtiles.gz --clobber
+            gh release edit world-base-latest --notes "$NOTES"
+          else
+            gh release create world-base-latest \
+              --title "World Base Tiles (Latest)" \
+              --notes "$NOTES" \
+              world-base.mbtiles.gz
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
