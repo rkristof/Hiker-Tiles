@@ -1,0 +1,31 @@
+name: Generate Belgium Tiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release channel to publish to.
+        required: false
+        default: latest
+        type: choice
+        options:
+          - latest
+          - beta
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate and publish country tiles
+        uses: ./.github/actions/generate-country-tiles
+        with:
+          country: belgium
+          version: ${{ vars.VERSION }}
+          routes_token: ${{ secrets.HIKER_ROUTES_TOKEN }}
+          tile_password: ${{ secrets.TILE_PASSWORD }}
+          release: ${{ inputs.release }}

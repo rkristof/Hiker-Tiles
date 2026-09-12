@@ -11,6 +11,9 @@ inputs:
     description: OSM tag key used to read route symbols (osmc:symbol, jel, or kct).
     required: false
     default: osmc:symbol
+  version:
+    description: Version identifier written to hiking MBTiles metadata.
+    required: true
   routes_token:
     description: Token with read access to the Hiker-Routes repository.
     required: true
@@ -103,15 +106,17 @@ runs:
         # Native collector retains geometry through three highway adjacency levels.
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
-          n/checkpoint=hiking \
           n/place=city n/place=town n/place=village n/place=hamlet \
           n/natural=peak n/natural=cave_entrance n/natural=volcano \
+          n/waterway=waterfall n/natural=spring \
+          n/checkpoint=hiking nw/tourism=picnic_site \
+          nw/tourism=alpine_hut nw/tourism=wilderness_hut \
           -o tiles-filtered.osm.pbf
         osmium tags-filter tiles-latest.osm.pbf w/highway \
           -o highways-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
         python3 .hiker-routes/extract_hiking_routes.py
-        rm -rf .hiker-routes tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+        rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
         echo "Natural points: $(wc -l < natural-points.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
         echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"
@@ -166,61 +171,10 @@ runs:
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
+        VERSION: ${{ inputs.version }}
       run: |
-        python3 << 'PYEOF'
-        import json
-        import os
-        import sqlite3
-
-        with open('routes-meta.json') as f:
-            routes = json.load(f)
-        filename = f'{os.environ["COUNTRY"]}-hiking.mbtiles'
-        conn = sqlite3.connect(filename)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS routes (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL DEFAULT '',
-                name_int TEXT NOT NULL DEFAULT '',
-                symbol TEXT NOT NULL DEFAULT '',
-                network TEXT NOT NULL DEFAULT '',
-                route_type TEXT NOT NULL DEFAULT '',
-                min_lon REAL,
-                min_lat REAL,
-                max_lon REAL,
-                max_lat REAL,
-                distance_m INTEGER,
-                elevation_gain_m INTEGER,
-                elevation_loss_m INTEGER,
-                elevation_profile TEXT NOT NULL DEFAULT '[]',
-                duration_min INTEGER,
-                start_lon REAL,
-                start_lat REAL,
-                finish_lon REAL,
-                finish_lat REAL
-            )
-        ''')
-        conn.executemany(
-            '''
-            INSERT OR REPLACE INTO routes (
-                id, name, name_int, symbol, network, route_type,
-                min_lon, min_lat, max_lon, max_lat, distance_m,
-                elevation_gain_m, elevation_loss_m, elevation_profile, duration_min,
-                start_lon, start_lat, finish_lon, finish_lat
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ''',
-            [(r['id'], r['name'], r['name_int'], r['symbol'], r['network'], r['type'],
-              r['min_lon'], r['min_lat'], r['max_lon'], r['max_lat'], r['distance_m'],
-              r['elevation_gain_m'], r['elevation_loss_m'],
-              json.dumps(r['elevation_profile'], separators=(',', ':')),
-              r['duration_min'],
-              r['start_lon'], r['start_lat'], r['finish_lon'], r['finish_lat'])
-             for r in routes]
-        )
-        conn.commit()
-        conn.execute('VACUUM')
-        conn.close()
-        print(f'Injected {len(routes)} routes into metadata table')
-        PYEOF
+        python3 .hiker-routes/inject_routes_metadata.py \
+          routes-meta.json "${COUNTRY}-hiking.mbtiles" "$VERSION"
         rm routes-meta.json
 
     - name: Generate and embed OSMC symbol images
@@ -240,15 +194,14 @@ runs:
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
-        TILES_PASSWORD: ${{ inputs.tile_password }}
+        TILE_PASSWORD: ${{ inputs.tile_password }}
       run: |
         openssl enc -aes-256-cbc \
           -pbkdf2 \
           -iter 600000 \
           -md sha256 \
           -salt \
-          -saltlen 16 \
-          -pass env:TILES_PASSWORD \
+          -pass env:TILE_PASSWORD \
           -in "${COUNTRY}-tiles.tar.gz" \
           -out "${COUNTRY}-tiles.tar.gz.enc"
         rm "${COUNTRY}-tiles.tar.gz"
