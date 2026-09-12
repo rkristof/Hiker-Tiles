@@ -236,15 +236,14 @@ runs:
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
-        TILES_PASSWORD: ${{ inputs.tile_password }}
+        TILE_PASSWORD: ${{ inputs.tile_password }}
       run: |
         openssl enc -aes-256-cbc \
           -pbkdf2 \
           -iter 600000 \
           -md sha256 \
           -salt \
-          -saltlen 16 \
-          -pass env:TILES_PASSWORD \
+          -pass env:TILE_PASSWORD \
           -in "${COUNTRY}-tiles.tar.gz" \
           -out "${COUNTRY}-tiles.tar.gz.enc"
         rm "${COUNTRY}-tiles.tar.gz"
