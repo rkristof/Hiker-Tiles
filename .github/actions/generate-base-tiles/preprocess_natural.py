@@ -5,16 +5,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import shutil
 import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
+
+from osgeo import gdal, ogr, osr
 
 LOGGER = logging.getLogger("preprocess_natural")
-
-MAX_WGS84_METERS_PER_DEGREE = 112000.0
 
 OSMIUM_FILTERS = (
     "wr/landuse=forest,grass,farmland,meadow,orchard,vineyard,farmyard,"
@@ -49,17 +50,11 @@ WHERE (
          OR natural IN ('wood', 'grassland', 'glacier', 'bare_rock', 'sand', 'heath', 'scrub', 'scree', 'shingle', 'wetland', 'fell', 'beach')
             OR HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh')
 )
-    -- Use the WGS84 bounding-box area as a cheap conservative prefilter. The
-    -- exact projected-area check below remains authoritative for retention.
-    AND ST_Area(ST_Envelope(geometry))
-        * {max_wgs84_meters_per_degree}
-        * {max_wgs84_meters_per_degree} >= {min_area_m2}
-    AND ST_Area(ST_Transform(geometry, 3035)) >= {min_area_m2}
 """
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract, classify, dissolve, and export low-zoom natural polygons."
+        description="Extract, classify, rasterize, and export low-zoom natural polygons."
     )
     parser.add_argument(
         "--input",
@@ -80,34 +75,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory for intermediate files.",
     )
     parser.add_argument(
-        "--nb-squarish-tiles",
-        type=int,
-        default=128,
-        help="Approximate number of spatial dissolve tiles.",
-    )
-    parser.add_argument(
-        "--gridsize-meters",
+        "--cell-size-meters",
         type=float,
-        default=300.0,
-        help="Coordinate precision grid used during dissolve, in meters.",
-    )
-    parser.add_argument(
-        "--min-area-m2",
-        type=float,
-        default=250000.0,
-        help="Minimum source polygon area retained before dissolve, in square meters.",
-    )
-    parser.add_argument(
-        "--nb-parallel",
-        type=int,
-        default=0,
-        help="GeoFileOps workers; zero uses its default CPU-based setting.",
-    )
-    parser.add_argument(
-        "--batchsize",
-        type=int,
-        default=-1,
-        help="GeoFileOps indicative batch size; -1 selects automatically.",
+        default=1000.0,
+        help="Side length of the coarse projected raster cells, in meters.",
     )
     return parser.parse_args()
 
@@ -133,6 +104,100 @@ def ensure_tools() -> None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
 
+def polygonize_natural_polygons(
+    input_path: Path,
+    output_path: Path,
+    raster_path: Path,
+    cell_size_meters: float,
+) -> None:
+    """Rasterize each natural class and polygonize its occupied cells."""
+    source = ogr.Open(str(input_path))
+    if source is None:
+        raise RuntimeError(f"Could not open {input_path}")
+    source_layer = source.GetLayerByName("natural")
+    if source_layer is None:
+        raise RuntimeError(f"Layer natural not found in {input_path}")
+
+    min_x, max_x, min_y, max_y = source_layer.GetExtent()
+    origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
+    origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
+    width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
+    height = max(1, math.ceil((origin_y - min_y) / cell_size_meters))
+
+    raster_driver = gdal.GetDriverByName("GTiff")
+    raster = raster_driver.Create(
+        str(raster_path),
+        width,
+        height,
+        1,
+        gdal.GDT_Byte,
+        options=["COMPRESS=LZW", "TILED=YES"],
+    )
+    if raster is None:
+        raise RuntimeError(f"Could not create {raster_path}")
+    raster.SetGeoTransform((origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters))
+    raster.SetProjection("EPSG:3035")
+    raster_band = raster.GetRasterBand(1)
+    raster_band.SetNoDataValue(0)
+
+    output_driver = ogr.GetDriverByName("GPKG")
+    if output_path.exists():
+        output_driver.DeleteDataSource(str(output_path))
+    output = output_driver.CreateDataSource(str(output_path))
+    if output is None:
+        raise RuntimeError(f"Could not create {output_path}")
+    spatial_ref = osr.SpatialReference()
+    spatial_ref.ImportFromEPSG(3035)
+    output_layer = output.CreateLayer("natural_low", spatial_ref, ogr.wkbPolygon)
+    output_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
+    output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
+    pixel_value_field_index = output_layer.GetLayerDefn().GetFieldIndex("pixel_value")
+
+    source_layer.SetAttributeFilter("kind IS NOT NULL")
+    kinds = sorted(
+        {
+            feature.GetField("kind")
+            for feature in source_layer
+            if feature.GetField("kind") is not None
+        }
+    )
+    for kind in kinds:
+        LOGGER.info("Rasterizing natural class: %s", kind)
+        raster_band.Fill(0)
+        source_layer.SetAttributeFilter(f"kind = '{kind}'")
+        if gdal.RasterizeLayer(
+            raster,
+            [1],
+            source_layer,
+            burn_values=[1],
+            options=["ALL_TOUCHED=TRUE"],
+        ) != 0:
+            raise RuntimeError(f"Could not rasterize natural class: {kind}")
+        output_layer.StartTransaction()
+        if gdal.Polygonize(
+            raster_band,
+            raster_band.GetMaskBand(),
+            output_layer,
+            pixel_value_field_index,
+            ["8CONNECTED=8"],
+        ) != 0:
+            output_layer.RollbackTransaction()
+            raise RuntimeError(f"Could not polygonize natural class: {kind}")
+        output_layer.CommitTransaction()
+        output_layer.ResetReading()
+        for feature in output_layer:
+            if feature.GetField("pixel_value") == 1 and not feature.GetField("kind"):
+                feature.SetField("kind", kind)
+                output_layer.SetFeature(feature)
+        output_layer.ResetReading()
+
+    source_layer.SetAttributeFilter(None)
+    output.FlushCache()
+    raster = None
+    output = None
+    source = None
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -140,12 +205,8 @@ def main() -> None:
 
     if not args.input.is_file():
         raise FileNotFoundError(f"Input file does not exist: {args.input}")
-    if args.nb_squarish_tiles < 1:
-        raise ValueError("--nb-squarish-tiles must be at least 1")
-    if args.gridsize_meters < 0:
-        raise ValueError("--gridsize-meters cannot be negative")
-    if args.min_area_m2 < 0:
-        raise ValueError("--min-area-m2 cannot be negative")
+    if args.cell_size_meters <= 0:
+        raise ValueError("--cell-size-meters must be positive")
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +214,8 @@ def main() -> None:
     filtered_pbf = args.workdir / "natural-filtered.osm.pbf"
     filter_file = args.workdir / "natural-filters.txt"
     valid_gpkg = args.workdir / "natural-valid.gpkg"
-    dissolved_gpkg = args.workdir / "natural-dissolved.gpkg"
+    raster_path = args.workdir / "natural-raster.tif"
+    polygonized_gpkg = args.workdir / "natural-polygonized.gpkg"
 
     filter_file.write_text("\n".join(OSMIUM_FILTERS) + "\n", encoding="utf-8")
 
@@ -170,7 +232,7 @@ def main() -> None:
             ]
         )
 
-    with timed_step("classify, filter, and convert to EPSG:3035 GeoPackage"):
+    with timed_step("classify and convert to EPSG:3035 GeoPackage"):
         run_command(
             [
                 "ogr2ogr",
@@ -181,10 +243,7 @@ def main() -> None:
                 "-dialect",
                 "SQLite",
                 "-sql",
-                NATURAL_CLASSIFICATION_SQL.format(
-                    min_area_m2=f"{args.min_area_m2:.12g}",
-                    max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
-                ),
+                NATURAL_CLASSIFICATION_SQL,
                 "-nln",
                 "natural",
                 "-nlt",
@@ -204,58 +263,22 @@ def main() -> None:
             ]
         )
 
-    import geofileops as gfo
+    with timed_step("rasterize and polygonize natural classes"):
+        polygonize_natural_polygons(
+            valid_gpkg,
+            polygonized_gpkg,
+            raster_path,
+            args.cell_size_meters,
+        )
 
-    with timed_step("dissolve polygons by kind with GeoFileOps"):
-        dissolve_kwargs: dict[str, Any] = {
-            "input_path": str(valid_gpkg),
-            "output_path": str(dissolved_gpkg),
-            "input_layer": "natural",
-            "output_layer": "natural_low",
-            "explodecollections": False,
-            "groupby_columns": ["kind"],
-            "nb_squarish_tiles": args.nb_squarish_tiles,
-            "gridsize": args.gridsize_meters,
-            "batchsize": args.batchsize,
-            "force": True,
-        }
-        if args.nb_parallel > 0:
-            dissolve_kwargs["nb_parallel"] = args.nb_parallel
-        dissolve_gridsizes = [args.gridsize_meters]
-        if args.gridsize_meters > 0:
-            dissolve_gridsizes.extend(
-                args.gridsize_meters / divisor for divisor in (2, 4, 10, 30)
-            )
-        for grid_index, gridsize in enumerate(dissolve_gridsizes):
-            dissolve_kwargs["gridsize"] = gridsize
-            try:
-                gfo.dissolve(**dissolve_kwargs)
-            except RuntimeError as error:
-                is_last_grid = grid_index == len(dissolve_gridsizes) - 1
-                if is_last_grid or "TopologyException" not in str(error):
-                    raise
-                LOGGER.warning(
-                    "GeoFileOps dissolve failed with %.g m grid; retrying "
-                    "with %.g m grid",
-                    gridsize,
-                    dissolve_gridsizes[grid_index + 1],
-                )
-            else:
-                break
-
-    with timed_step("merge dissolved polygons and export as WGS84 GeoJSONSeq"):
+    with timed_step("export polygonized natural layer as WGS84 GeoJSONSeq"):
         run_command(
             [
                 "ogr2ogr",
                 "-f",
                 "GeoJSONSeq",
                 str(args.output),
-                str(dissolved_gpkg),
-                "-dialect",
-                "SQLite",
-                "-sql",
-                "SELECT ST_Union(geom) AS geometry, kind "
-                "FROM natural_low GROUP BY kind",
+                str(polygonized_gpkg),
                 "-nln",
                 "natural_low",
                 "-nlt",
