@@ -144,6 +144,7 @@ def polygonize_natural_polygons(
     min_area_m2: float,
 ) -> None:
     """Rasterize classified PBF geometries and export occupied cells."""
+    gdal.SetConfigOption("OGR_INTERLEAVED_READING", "YES")
     source = ogr.Open(str(input_path))
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
@@ -161,8 +162,8 @@ def polygonize_natural_polygons(
         ordered_layer = source.ExecuteSQL(
             NATURAL_CLASSIFICATION_SQL.format(
                 min_area_m2=f"{min_area_m2:.12g}",
-                max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
-            ),
+                max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.1f}",
+            ).strip(),
             dialect="SQLite",
         )
         if ordered_layer is None:
