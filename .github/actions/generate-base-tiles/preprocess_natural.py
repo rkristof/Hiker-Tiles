@@ -146,7 +146,7 @@ def run_command(command: list[str]) -> None:
 
 
 def ensure_tools() -> None:
-    for tool in ("osmium",):
+    for tool in ("osmium", "ogr2ogr"):
         if shutil.which(tool) is None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
@@ -155,6 +155,7 @@ def polygonize_natural_polygons(
     input_path: Path,
     output_path: Path,
     raster_path: Path,
+    polygonized_path: Path,
     cell_size_meters: float,
     min_area_m2: float,
 ) -> None:
@@ -167,9 +168,9 @@ def polygonize_natural_polygons(
         raise RuntimeError(f"Layer multipolygons not found in {input_path}")
 
     ordered_layer = None
+    materialized = None
     raster = None
     polygonized = None
-    output = None
     try:
         ordered_layer = source.ExecuteSQL(
             NATURAL_CLASSIFICATION_SQL.format(
@@ -182,7 +183,17 @@ def polygonize_natural_polygons(
         if ordered_layer is None:
             raise RuntimeError("Could not classify natural polygons")
 
-        min_x, max_x, min_y, max_y = ordered_layer.GetExtent()
+        memory_driver = ogr.GetDriverByName("Memory")
+        materialized = memory_driver.CreateDataSource("natural_classified")
+        if materialized is None:
+            raise RuntimeError("Could not create in-memory classified layer")
+        materialized_layer = materialized.CopyLayer(ordered_layer, "natural")
+        if materialized_layer is None:
+            raise RuntimeError("Could not materialize classified natural polygons")
+        source.ReleaseResultSet(ordered_layer)
+        ordered_layer = None
+
+        min_x, max_x, min_y, max_y = materialized_layer.GetExtent()
         origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
         origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
         width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
@@ -210,16 +221,18 @@ def polygonize_natural_polygons(
         if gdal.RasterizeLayer(
             raster,
             [1],
-            ordered_layer,
+            materialized_layer,
             options=["ATTRIBUTE=pixel_value"],
         ) != 0:
             raise RuntimeError("Could not rasterize natural classes")
         raster_band.FlushCache()
 
-        memory_driver = ogr.GetDriverByName("Memory")
-        polygonized = memory_driver.CreateDataSource("natural_polygonized")
+        geojson_driver = ogr.GetDriverByName("GeoJSONSeq")
+        if polygonized_path.exists():
+            polygonized_path.unlink()
+        polygonized = geojson_driver.CreateDataSource(str(polygonized_path))
         if polygonized is None:
-            raise RuntimeError("Could not create in-memory polygonized layer")
+            raise RuntimeError(f"Could not create {polygonized_path}")
         spatial_ref = osr.SpatialReference()
         spatial_ref.ImportFromEPSG(3035)
         polygonized_layer = polygonized.CreateLayer(
@@ -238,44 +251,48 @@ def polygonize_natural_polygons(
             ["8CONNECTED=8"],
         ) != 0:
             raise RuntimeError("Could not polygonize natural classes")
+        polygonized = None
 
-        geojson_driver = ogr.GetDriverByName("GeoJSONSeq")
-        if output_path.exists():
-            output_path.unlink()
-        output = geojson_driver.CreateDataSource(str(output_path))
-        if output is None:
-            raise RuntimeError(f"Could not create {output_path}")
-        wgs84 = osr.SpatialReference()
-        wgs84.ImportFromEPSG(4326)
-        output_layer = output.CreateLayer(
-            "natural_low",
-            wgs84,
-            ogr.wkbPolygon,
-            options=["RS=NO", "COORDINATE_PRECISION=6"],
+        kind_case = " ".join(
+            f"WHEN {pixel_value} THEN '{kind}'"
+            for pixel_value, kind in enumerate(NATURAL_PRIORITY, start=1)
         )
-        output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
-        output_defn = output_layer.GetLayerDefn()
-        polygonized_layer.ResetReading()
-        for feature in polygonized_layer:
-            pixel_value = feature.GetFieldAsInteger("pixel_value")
-            if pixel_value <= 0 or pixel_value > len(NATURAL_PRIORITY):
-                continue
-            geometry = feature.GetGeometryRef().Clone()
-            if geometry.TransformTo(wgs84) != 0:
-                raise RuntimeError("Could not transform polygonized natural geometry")
-            output_feature = ogr.Feature(output_defn)
-            output_feature.SetGeometry(geometry)
-            output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
-            if output_layer.CreateFeature(output_feature) != 0:
-                raise RuntimeError("Could not write polygonized natural feature")
-        output.FlushCache()
+        run_command(
+            [
+                "ogr2ogr",
+                "-f",
+                "GeoJSONSeq",
+                str(output_path),
+                str(polygonized_path),
+                "-dialect",
+                "SQLite",
+                "-sql",
+                "SELECT geometry, CASE pixel_value "
+                f"{kind_case} END AS kind "
+                f'FROM "{polygonized_path.stem}" WHERE pixel_value > 0',
+                "-nln",
+                "natural_low",
+                "-nlt",
+                "POLYGON",
+                "-explodecollections",
+                "-t_srs",
+                "EPSG:4326",
+                "-lco",
+                "RS=NO",
+                "-lco",
+                "COORDINATE_PRECISION=6",
+                "-overwrite",
+            ]
+        )
     finally:
         if ordered_layer is not None:
             source.ReleaseResultSet(ordered_layer)
+        materialized = None
         raster = None
         polygonized = None
-        output = None
         source = None
+        if polygonized_path.exists():
+            polygonized_path.unlink()
 
 
 def main() -> None:
@@ -296,6 +313,7 @@ def main() -> None:
     filtered_pbf = args.workdir / "natural-filtered.osm.pbf"
     filter_file = args.workdir / "natural-filters.txt"
     raster_path = args.workdir / "natural-raster.tif"
+    polygonized_path = args.workdir / "natural-polygonized.geojsonseq"
 
     filter_file.write_text("\n".join(OSMIUM_FILTERS) + "\n", encoding="utf-8")
 
@@ -317,6 +335,7 @@ def main() -> None:
             filtered_pbf,
             args.output,
             raster_path,
+            polygonized_path,
             args.cell_size_meters,
             args.min_area_m2,
         )
