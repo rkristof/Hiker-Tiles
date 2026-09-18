@@ -62,7 +62,25 @@ SELECT geometry,
         WHEN HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh') THEN 'marsh'
         WHEN natural = 'wetland' THEN 'marsh'
         WHEN natural = 'fell' THEN 'grass'
-    END AS kind
+    END AS kind,
+    CASE
+        WHEN landuse IN ('forest', 'grass', 'farmland') THEN
+            CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 15 END
+        WHEN natural = 'wood' THEN 15
+        WHEN natural = 'grassland' OR landuse = 'meadow' THEN 1
+        WHEN landuse IN ('orchard', 'vineyard', 'farmyard', 'greenhouse_horticulture', 'allotments') THEN 2
+        WHEN landuse = 'quarry' THEN 11
+        WHEN natural = 'glacier' THEN 14
+        WHEN natural = 'bare_rock' THEN 12
+        WHEN natural IN ('sand', 'beach') THEN 9
+        WHEN natural = 'heath' THEN 7
+        WHEN natural = 'scrub' THEN 8
+        WHEN natural = 'scree' THEN 13
+        WHEN natural = 'shingle' THEN 10
+        WHEN HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh') THEN 3
+        WHEN natural = 'wetland' THEN 3
+        WHEN natural = 'fell' THEN 1
+    END AS pixel_value
 FROM multipolygons
 WHERE (
         landuse IN ('forest', 'grass', 'farmland', 'meadow', 'orchard', 'vineyard', 'farmyard', 'greenhouse_horticulture', 'allotments', 'quarry')
@@ -139,7 +157,7 @@ def polygonize_natural_polygons(
     raster_path: Path,
     cell_size_meters: float,
 ) -> None:
-    """Rasterize each natural class and polygonize its occupied cells."""
+    """Rasterize priority-ordered natural polygons and polygonize occupied cells."""
     source = ogr.Open(str(input_path))
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
@@ -179,31 +197,22 @@ def polygonize_natural_polygons(
     spatial_ref.ImportFromEPSG(3035)
     output_layer = output.CreateLayer("natural_low", spatial_ref, ogr.wkbPolygon)
     output_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
-    output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
     pixel_value_field_index = output_layer.GetLayerDefn().GetFieldIndex("pixel_value")
 
-    source_layer.SetAttributeFilter("kind IS NOT NULL")
-    available_kinds = {
-        feature.GetField("kind")
-        for feature in source_layer
-        if feature.GetField("kind") is not None
-    }
-    kinds = [kind for kind in NATURAL_PRIORITY if kind in available_kinds]
-    kinds.extend(
-        {
-            kind for kind in available_kinds if kind not in NATURAL_PRIORITY
-        }
+    ordered_layer = source.ExecuteSQL(
+        "SELECT * FROM natural ORDER BY pixel_value ASC"
     )
-    for pixel_value, kind in enumerate(kinds, start=1):
-        LOGGER.info("Rasterizing natural class: %s", kind)
-        source_layer.SetAttributeFilter(f"kind = '{kind}'")
-        if gdal.RasterizeLayer(
-            raster,
-            [1],
-            source_layer,
-            burn_values=[pixel_value],
-        ) != 0:
-            raise RuntimeError(f"Could not rasterize natural class: {kind}")
+    if ordered_layer is None:
+        raise RuntimeError("Could not order natural polygons by pixel value")
+    if gdal.RasterizeLayer(
+        raster,
+        [1],
+        ordered_layer,
+        options=["ATTRIBUTE=pixel_value"],
+    ) != 0:
+        source.ReleaseResultSet(ordered_layer)
+        raise RuntimeError("Could not rasterize natural classes")
+    source.ReleaseResultSet(ordered_layer)
 
     if gdal.Polygonize(
         raster_band,
@@ -213,18 +222,6 @@ def polygonize_natural_polygons(
         ["8CONNECTED=8"],
     ) != 0:
         raise RuntimeError("Could not polygonize natural classes")
-    output_layer.ResetReading()
-    kind_by_pixel_value = dict(enumerate(kinds, start=1))
-    for feature in output_layer:
-        kind = kind_by_pixel_value.get(feature.GetField("pixel_value"))
-        if kind is None:
-            output_layer.DeleteFeature(feature.GetFID())
-            continue
-        feature.SetField("kind", kind)
-        output_layer.SetFeature(feature)
-    output_layer.ResetReading()
-
-    source_layer.SetAttributeFilter(None)
     output.FlushCache()
     raster = None
     output = None
@@ -310,6 +307,10 @@ def main() -> None:
         )
 
     with timed_step("export polygonized natural layer as WGS84 GeoJSONSeq"):
+        kind_case = " ".join(
+            f"WHEN {pixel_value} THEN '{kind}'"
+            for pixel_value, kind in enumerate(NATURAL_PRIORITY, start=1)
+        )
         run_command(
             [
                 "ogr2ogr",
@@ -317,6 +318,12 @@ def main() -> None:
                 "GeoJSONSeq",
                 str(args.output),
                 str(polygonized_gpkg),
+                "-dialect",
+                "SQLite",
+                "-sql",
+                "SELECT geom, CASE pixel_value "
+                f"{kind_case} END AS kind "
+                "FROM natural_low WHERE pixel_value > 0",
                 "-nln",
                 "natural_low",
                 "-nlt",
