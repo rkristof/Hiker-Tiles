@@ -153,7 +153,7 @@ def polygonize_natural_polygons(
 ) -> None:
     """Rasterize classified PBF geometries and export occupied cells."""
     gdal.SetConfigOption("OGR_INTERLEAVED_READING", "YES")
-    source = ogr.Open(str(input_path))
+    source = gdal.OpenEx(str(input_path), gdal.OF_VECTOR)
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
 
