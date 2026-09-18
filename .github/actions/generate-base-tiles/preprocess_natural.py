@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cell-size-meters",
         type=float,
-        default=300.0,
+        default=500.0,
         help="Side length of the coarse projected raster cells, in meters.",
     )
     parser.add_argument(
@@ -145,7 +145,6 @@ def polygonize_natural_polygons(
     min_area_m2: float,
 ) -> None:
     """Rasterize classified PBF geometries and export occupied cells."""
-    gdal.SetConfigOption("OGR_INTERLEAVED_READING", "YES")
     source = ogr.Open(str(input_path))
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
@@ -209,6 +208,7 @@ def polygonize_natural_polygons(
             )
             if materialized_layer.CreateFeature(materialized_feature) != 0:
                 raise RuntimeError("Could not materialize classified natural polygon")
+        materialized_layer.ResetReading()
         source.ReleaseResultSet(ordered_layer)
         ordered_layer = None
 
