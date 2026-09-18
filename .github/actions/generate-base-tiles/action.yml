@@ -35,8 +35,7 @@ runs:
           --user \
           --break-system-packages \
           --disable-pip-version-check \
-          "GDAL==${GDAL_VERSION}" \
-          "shapely>=2.0,<3"
+          "GDAL==${GDAL_VERSION}"
 
     - name: Preprocess natural polygons
       shell: bash

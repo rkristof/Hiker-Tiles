@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Iterator
 
 from osgeo import gdal, ogr, osr
-from shapely import from_wkb, to_wkb, union_all
 
 gdal.UseExceptions()
 ogr.UseExceptions()
@@ -154,6 +153,7 @@ def polygonize_natural_polygons(
 
     ordered_layer = None
     materialized = None
+    materialized_layers: list[ogr.Layer] = []
     raster = None
     polygonized = None
     output_data_source = None
@@ -162,8 +162,7 @@ def polygonize_natural_polygons(
             NATURAL_CLASSIFICATION_SQL.format(
                 min_area_m2=f"{min_area_m2:.12g}",
                 max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
-            )
-            + "\nORDER BY pixel_value ASC",
+            ),
             dialect="SQLite",
         )
         if ordered_layer is None:
@@ -186,13 +185,18 @@ def polygonize_natural_polygons(
         source_to_projected = osr.CoordinateTransformation(
             source_spatial_ref, projected_spatial_ref
         )
-        materialized_layer = materialized.CreateLayer(
-            "natural", projected_spatial_ref, ogr.wkbUnknown
-        )
-        if materialized_layer is None:
-            raise RuntimeError("Could not create in-memory classified layer")
-        materialized_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
+        for pixel_value in range(1, len(NATURAL_PRIORITY) + 1):
+            materialized_layer = materialized.CreateLayer(
+                f"natural_{pixel_value}", projected_spatial_ref, ogr.wkbUnknown
+            )
+            if materialized_layer is None:
+                raise RuntimeError("Could not create in-memory classified layer")
+            materialized_layers.append(materialized_layer)
+
         for source_feature in ordered_layer:
+            pixel_value = source_feature.GetFieldAsInteger("pixel_value")
+            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
+                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
             source_geometry = source_feature.GetGeometryRef()
             if source_geometry is None:
                 continue
@@ -201,18 +205,26 @@ def polygonize_natural_polygons(
                 raise RuntimeError("Could not transform natural polygon to EPSG:3035")
             if geometry.IsEmpty() or geometry.GetArea() < min_area_m2:
                 continue
+            materialized_layer = materialized_layers[pixel_value - 1]
             materialized_feature = ogr.Feature(materialized_layer.GetLayerDefn())
             materialized_feature.SetGeometry(geometry)
-            materialized_feature.SetField(
-                "pixel_value", source_feature.GetFieldAsInteger("pixel_value")
-            )
             if materialized_layer.CreateFeature(materialized_feature) != 0:
                 raise RuntimeError("Could not materialize classified natural polygon")
-        materialized_layer.ResetReading()
         source.ReleaseResultSet(ordered_layer)
         ordered_layer = None
 
-        min_x, max_x, min_y, max_y = materialized_layer.GetExtent()
+        extents = [
+            layer.GetExtent()
+            for layer in materialized_layers
+            if layer.GetFeatureCount() > 0
+        ]
+        if extents:
+            min_x = min(extent[0] for extent in extents)
+            max_x = max(extent[1] for extent in extents)
+            min_y = min(extent[2] for extent in extents)
+            max_y = max(extent[3] for extent in extents)
+        else:
+            min_x = max_x = min_y = max_y = 0.0
         origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
         origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
         width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
@@ -230,13 +242,16 @@ def polygonize_natural_polygons(
         raster_band.SetNoDataValue(0)
         raster_band.Fill(0)
 
-        if gdal.RasterizeLayer(
-            raster,
-            [1],
-            materialized_layer,
-            options=["ATTRIBUTE=pixel_value"],
-        ) != 0:
-            raise RuntimeError("Could not rasterize natural classes")
+        for pixel_value, materialized_layer in enumerate(materialized_layers, start=1):
+            if materialized_layer.GetFeatureCount() == 0:
+                continue
+            if gdal.RasterizeLayer(
+                raster,
+                [1],
+                materialized_layer,
+                burn_values=[pixel_value],
+            ) != 0:
+                raise RuntimeError("Could not rasterize natural classes")
 
         polygonized = memory_driver.CreateDataSource("natural_polygonized")
         if polygonized is None:
@@ -258,18 +273,6 @@ def polygonize_natural_polygons(
             ["8CONNECTED=8"],
         ) != 0:
             raise RuntimeError("Could not polygonize natural classes")
-
-        geometries_by_pixel: dict[int, list[object]] = {}
-        polygonized_layer.ResetReading()
-        for feature in polygonized_layer:
-            pixel_value = feature.GetFieldAsInteger("pixel_value")
-            if pixel_value == 0:
-                continue
-            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
-                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
-            geometries_by_pixel.setdefault(pixel_value, []).append(
-                from_wkb(bytes(feature.GetGeometryRef().ExportToWkb()))
-            )
 
         output_driver = ogr.GetDriverByName("GeoJSONSeq")
         if output_driver is None:
@@ -297,23 +300,38 @@ def polygonize_natural_polygons(
         output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
         output_definition = output_layer.GetLayerDefn()
 
-        for pixel_value, geometries in geometries_by_pixel.items():
-            dissolved = union_all(geometries)
-            dissolved_geometries = (
-                dissolved.geoms
-                if dissolved.geom_type == "MultiPolygon"
-                else (dissolved,)
-            )
-            for dissolved_geometry in dissolved_geometries:
-                if dissolved_geometry.is_empty:
+        polygonized_layer.ResetReading()
+        for feature in polygonized_layer:
+            pixel_value = feature.GetFieldAsInteger("pixel_value")
+            if pixel_value == 0:
+                continue
+            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
+                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
+            source_geometry = feature.GetGeometryRef()
+            if source_geometry is None or source_geometry.IsEmpty():
+                continue
+            geometry = source_geometry.Clone()
+            gdal.PushErrorHandler("CPLQuietErrorHandler")
+            try:
+                geometry_is_valid = geometry.IsValid()
+            finally:
+                gdal.PopErrorHandler()
+            if not geometry_is_valid:
+                geometry = geometry.MakeValid()
+                if geometry is None or geometry.IsEmpty():
                     continue
-                geometry = ogr.CreateGeometryFromWkb(to_wkb(dissolved_geometry))
-                if geometry is None:
-                    raise RuntimeError("Could not convert dissolved natural polygon")
-                if geometry.Transform(coordinate_transform) != 0:
-                    raise RuntimeError("Could not transform natural polygon to WGS84")
+            if geometry.Transform(coordinate_transform) != 0:
+                raise RuntimeError("Could not transform natural polygon to WGS84")
+            if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbMultiPolygon:
+                output_geometries = (
+                    geometry.GetGeometryRef(index).Clone()
+                    for index in range(geometry.GetGeometryCount())
+                )
+            else:
+                output_geometries = (geometry,)
+            for output_geometry in output_geometries:
                 output_feature = ogr.Feature(output_definition)
-                output_feature.SetGeometry(geometry)
+                output_feature.SetGeometry(output_geometry)
                 output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
                 if output_layer.CreateFeature(output_feature) != 0:
                     raise RuntimeError(f"Could not write feature to {output_path}")
@@ -322,6 +340,7 @@ def polygonize_natural_polygons(
     finally:
         if ordered_layer is not None:
             source.ReleaseResultSet(ordered_layer)
+        materialized_layers = []
         materialized = None
         raster = None
         polygonized = None
