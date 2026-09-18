@@ -30,9 +30,6 @@ NATURAL_PRIORITY = (
     "grass",
     "farmland",
     "marsh",
-    "bog",
-    "wet_meadow",
-    "swamp",
     "heath",
     "scrub",
     "sand",
@@ -47,36 +44,19 @@ NATURAL_PRIORITY = (
 NATURAL_CLASSIFICATION_SQL = """
     SELECT ST_Transform(geometry, 3035) AS geometry,
     CASE
-        WHEN landuse IN ('forest', 'grass', 'farmland') THEN landuse
-        WHEN natural = 'wood' THEN 'forest'
-        WHEN natural = 'grassland' OR landuse = 'meadow' THEN 'grass'
-        WHEN landuse IN ('orchard', 'vineyard', 'farmyard', 'greenhouse_horticulture', 'allotments') THEN 'farmland'
-        WHEN landuse = 'quarry' THEN 'quarry'
-        WHEN natural = 'glacier' THEN 'glacier'
-        WHEN natural = 'bare_rock' THEN 'bare_rock'
-        WHEN natural IN ('sand', 'beach') THEN 'sand'
-        WHEN natural = 'heath' THEN 'heath'
-        WHEN natural = 'scrub' THEN 'scrub'
-        WHEN natural = 'scree' THEN 'scree'
-        WHEN natural = 'shingle' THEN 'shingle'
-        WHEN HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh') THEN 'marsh'
-        WHEN natural = 'wetland' THEN 'marsh'
-        WHEN natural = 'fell' THEN 'grass'
-    END AS kind,
-    CASE
         WHEN landuse IN ('forest', 'grass', 'farmland') THEN
-            CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 15 END
-        WHEN natural = 'wood' THEN 15
+            CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 12 END
+        WHEN natural = 'wood' THEN 12
         WHEN natural = 'grassland' OR landuse = 'meadow' THEN 1
         WHEN landuse IN ('orchard', 'vineyard', 'farmyard', 'greenhouse_horticulture', 'allotments') THEN 2
-        WHEN landuse = 'quarry' THEN 11
-        WHEN natural = 'glacier' THEN 14
-        WHEN natural = 'bare_rock' THEN 12
-        WHEN natural IN ('sand', 'beach') THEN 9
-        WHEN natural = 'heath' THEN 7
-        WHEN natural = 'scrub' THEN 8
-        WHEN natural = 'scree' THEN 13
-        WHEN natural = 'shingle' THEN 10
+        WHEN landuse = 'quarry' THEN 8
+        WHEN natural = 'glacier' THEN 11
+        WHEN natural = 'bare_rock' THEN 9
+        WHEN natural IN ('sand', 'beach') THEN 6
+        WHEN natural = 'heath' THEN 4
+        WHEN natural = 'scrub' THEN 5
+        WHEN natural = 'scree' THEN 10
+        WHEN natural = 'shingle' THEN 7
         WHEN HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh') THEN 3
         WHEN natural = 'wetland' THEN 3
         WHEN natural = 'fell' THEN 1
@@ -146,7 +126,7 @@ def run_command(command: list[str]) -> None:
 
 
 def ensure_tools() -> None:
-    for tool in ("osmium", "ogr2ogr"):
+    for tool in ("osmium",):
         if shutil.which(tool) is None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
@@ -154,8 +134,6 @@ def ensure_tools() -> None:
 def polygonize_natural_polygons(
     input_path: Path,
     output_path: Path,
-    raster_path: Path,
-    polygonized_path: Path,
     cell_size_meters: float,
     min_area_m2: float,
 ) -> None:
@@ -199,17 +177,10 @@ def polygonize_natural_polygons(
         width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
         height = max(1, math.ceil((origin_y - min_y) / cell_size_meters))
 
-        raster_driver = gdal.GetDriverByName("GTiff")
-        raster = raster_driver.Create(
-            str(raster_path),
-            width,
-            height,
-            1,
-            gdal.GDT_Byte,
-            options=["COMPRESS=LZW", "TILED=YES"],
-        )
+        raster_driver = gdal.GetDriverByName("MEM")
+        raster = raster_driver.Create("", width, height, 1, gdal.GDT_Byte)
         if raster is None:
-            raise RuntimeError(f"Could not create {raster_path}")
+            raise RuntimeError("Could not create in-memory raster")
         raster.SetGeoTransform(
             (origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters)
         )
@@ -225,14 +196,11 @@ def polygonize_natural_polygons(
             options=["ATTRIBUTE=pixel_value"],
         ) != 0:
             raise RuntimeError("Could not rasterize natural classes")
-        raster_band.FlushCache()
 
-        polygon_driver = ogr.GetDriverByName("FlatGeobuf")
-        if polygonized_path.exists():
-            polygonized_path.unlink()
-        polygonized = polygon_driver.CreateDataSource(str(polygonized_path))
+        polygon_driver = ogr.GetDriverByName("Memory")
+        polygonized = polygon_driver.CreateDataSource("natural_polygonized")
         if polygonized is None:
-            raise RuntimeError(f"Could not create {polygonized_path}")
+            raise RuntimeError("Could not create in-memory polygonized layer")
         spatial_ref = osr.SpatialReference()
         spatial_ref.ImportFromEPSG(3035)
         polygonized_layer = polygonized.CreateLayer(
@@ -251,39 +219,32 @@ def polygonize_natural_polygons(
             ["8CONNECTED=8"],
         ) != 0:
             raise RuntimeError("Could not polygonize natural classes")
-        polygonized = None
 
         kind_case = " ".join(
             f"WHEN {pixel_value} THEN '{kind}'"
             for pixel_value, kind in enumerate(NATURAL_PRIORITY, start=1)
         )
-        run_command(
-            [
-                "ogr2ogr",
-                "-f",
-                "GeoJSONSeq",
-                str(output_path),
-                str(polygonized_path),
-                "-dialect",
-                "SQLite",
-                "-sql",
-                "SELECT geometry, CASE pixel_value "
-                f"{kind_case} END AS kind "
-                "FROM natural_low WHERE pixel_value > 0",
-                "-nln",
-                "natural_low",
-                "-nlt",
-                "POLYGON",
-                "-explodecollections",
-                "-t_srs",
-                "EPSG:4326",
-                "-lco",
-                "RS=NO",
-                "-lco",
-                "COORDINATE_PRECISION=6",
-                "-overwrite",
-            ]
+        translated = gdal.VectorTranslate(
+            str(output_path),
+            polygonized,
+            options=gdal.VectorTranslateOptions(
+                format="GeoJSONSeq",
+                accessMode="overwrite",
+                SQLStatement=(
+                    "SELECT geometry, CASE pixel_value "
+                    f"{kind_case} END AS kind "
+                    "FROM natural_low WHERE pixel_value > 0"
+                ),
+                SQLDialect="SQLite",
+                layerName="natural_low",
+                geometryType="POLYGON",
+                dstSRS="EPSG:4326",
+                layerCreationOptions=["RS=NO", "COORDINATE_PRECISION=6"],
+            ),
         )
+        if translated is None:
+            raise RuntimeError(f"Could not export {output_path}")
+        translated = None
     finally:
         if ordered_layer is not None:
             source.ReleaseResultSet(ordered_layer)
@@ -291,8 +252,6 @@ def polygonize_natural_polygons(
         raster = None
         polygonized = None
         source = None
-        if polygonized_path.exists():
-            polygonized_path.unlink()
 
 
 def main() -> None:
@@ -312,8 +271,6 @@ def main() -> None:
 
     filtered_pbf = args.workdir / "natural-filtered.osm.pbf"
     filter_file = args.workdir / "natural-filters.txt"
-    raster_path = args.workdir / "natural-raster.tif"
-    polygonized_path = args.workdir / "natural-polygonized.fgb"
 
     filter_file.write_text("\n".join(OSMIUM_FILTERS) + "\n", encoding="utf-8")
 
@@ -334,8 +291,6 @@ def main() -> None:
         polygonize_natural_polygons(
             filtered_pbf,
             args.output,
-            raster_path,
-            polygonized_path,
             args.cell_size_meters,
             args.min_area_m2,
         )

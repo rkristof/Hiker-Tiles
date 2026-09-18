@@ -22,7 +22,6 @@ runs:
           libshp-dev \
           libsqlite3-dev \
           libsqlite3-mod-spatialite \
-          gdal-bin \
           libgdal-dev \
           osmium-tool \
           python3-pip \
