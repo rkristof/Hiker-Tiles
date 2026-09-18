@@ -46,7 +46,7 @@ NATURAL_PRIORITY = (
 )
 
 NATURAL_CLASSIFICATION_SQL = """
-    SELECT ST_Transform(geometry, 3035) AS geometry,
+    SELECT geometry,
     CASE
         WHEN landuse IN ('forest', 'grass', 'farmland') THEN
             CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 12 END
@@ -74,7 +74,6 @@ WHERE (
 AND ST_Area(ST_Envelope(geometry))
     * {max_wgs84_meters_per_degree}
     * {max_wgs84_meters_per_degree} >= {min_area_m2}
-AND ST_Area(ST_Transform(geometry, 3035)) >= {min_area_m2}
 """
 
 def parse_args() -> argparse.Namespace:
@@ -176,9 +175,39 @@ def polygonize_natural_polygons(
         materialized = memory_driver.CreateDataSource("natural_classified")
         if materialized is None:
             raise RuntimeError("Could not create in-memory classified layer")
-        materialized_layer = materialized.CopyLayer(ordered_layer, "natural")
+        projected_spatial_ref = osr.SpatialReference()
+        projected_spatial_ref.ImportFromEPSG(3035)
+        projected_spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        source_spatial_ref = source_layer.GetSpatialRef()
+        if source_spatial_ref is None:
+            raise RuntimeError("Input layer has no spatial reference")
+        source_spatial_ref = source_spatial_ref.Clone()
+        source_spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        source_to_projected = osr.CoordinateTransformation(
+            source_spatial_ref, projected_spatial_ref
+        )
+        materialized_layer = materialized.CreateLayer(
+            "natural", projected_spatial_ref, ogr.wkbUnknown
+        )
         if materialized_layer is None:
-            raise RuntimeError("Could not materialize classified natural polygons")
+            raise RuntimeError("Could not create in-memory classified layer")
+        materialized_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
+        for source_feature in ordered_layer:
+            source_geometry = source_feature.GetGeometryRef()
+            if source_geometry is None:
+                continue
+            geometry = source_geometry.Clone()
+            if geometry.Transform(source_to_projected) != 0:
+                raise RuntimeError("Could not transform natural polygon to EPSG:3035")
+            if geometry.IsEmpty() or geometry.GetArea() < min_area_m2:
+                continue
+            materialized_feature = ogr.Feature(materialized_layer.GetLayerDefn())
+            materialized_feature.SetGeometry(geometry)
+            materialized_feature.SetField(
+                "pixel_value", source_feature.GetFieldAsInteger("pixel_value")
+            )
+            if materialized_layer.CreateFeature(materialized_feature) != 0:
+                raise RuntimeError("Could not materialize classified natural polygon")
         source.ReleaseResultSet(ordered_layer)
         ordered_layer = None
 
@@ -208,15 +237,10 @@ def polygonize_natural_polygons(
         ) != 0:
             raise RuntimeError("Could not rasterize natural classes")
 
-        polygon_driver = memory_vector_driver()
-        if polygon_driver is None:
-            raise RuntimeError("No in-memory vector driver available")
-        polygonized = polygon_driver.CreateDataSource("natural_polygonized")
+        polygonized = memory_driver.CreateDataSource("natural_polygonized")
         if polygonized is None:
             raise RuntimeError("Could not create in-memory polygonized layer")
-        spatial_ref = osr.SpatialReference()
-        spatial_ref.ImportFromEPSG(3035)
-        spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        spatial_ref = projected_spatial_ref
         polygonized_layer = polygonized.CreateLayer(
             "natural_low", spatial_ref, ogr.wkbPolygon
         )
