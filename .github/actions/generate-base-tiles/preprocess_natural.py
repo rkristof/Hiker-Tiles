@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterator
 
 from osgeo import gdal, ogr, osr
+from shapely import from_wkb, to_wkb, union_all
 
 gdal.UseExceptions()
 ogr.UseExceptions()
@@ -134,6 +135,10 @@ def ensure_tools() -> None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
 
+def memory_vector_driver() -> ogr.Driver:
+    return ogr.GetDriverByName("MEM") or ogr.GetDriverByName("Memory")
+
+
 def polygonize_natural_polygons(
     input_path: Path,
     output_path: Path,
@@ -165,7 +170,9 @@ def polygonize_natural_polygons(
         if ordered_layer is None:
             raise RuntimeError("Could not classify natural polygons")
 
-        memory_driver = ogr.GetDriverByName("Memory")
+        memory_driver = memory_vector_driver()
+        if memory_driver is None:
+            raise RuntimeError("No in-memory vector driver available")
         materialized = memory_driver.CreateDataSource("natural_classified")
         if materialized is None:
             raise RuntimeError("Could not create in-memory classified layer")
@@ -201,7 +208,9 @@ def polygonize_natural_polygons(
         ) != 0:
             raise RuntimeError("Could not rasterize natural classes")
 
-        polygon_driver = ogr.GetDriverByName("Memory")
+        polygon_driver = memory_vector_driver()
+        if polygon_driver is None:
+            raise RuntimeError("No in-memory vector driver available")
         polygonized = polygon_driver.CreateDataSource("natural_polygonized")
         if polygonized is None:
             raise RuntimeError("Could not create in-memory polygonized layer")
@@ -224,6 +233,18 @@ def polygonize_natural_polygons(
             ["8CONNECTED=8"],
         ) != 0:
             raise RuntimeError("Could not polygonize natural classes")
+
+        geometries_by_pixel: dict[int, list[object]] = {}
+        polygonized_layer.ResetReading()
+        for feature in polygonized_layer:
+            pixel_value = feature.GetFieldAsInteger("pixel_value")
+            if pixel_value == 0:
+                continue
+            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
+                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
+            geometries_by_pixel.setdefault(pixel_value, []).append(
+                from_wkb(bytes(feature.GetGeometryRef().ExportToWkb()))
+            )
 
         output_driver = ogr.GetDriverByName("GeoJSONSeq")
         if output_driver is None:
@@ -251,22 +272,27 @@ def polygonize_natural_polygons(
         output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
         output_definition = output_layer.GetLayerDefn()
 
-        polygonized_layer.ResetReading()
-        for feature in polygonized_layer:
-            pixel_value = feature.GetFieldAsInteger("pixel_value")
-            if pixel_value == 0:
-                continue
-            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
-                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
-            geometry = feature.GetGeometryRef().Clone()
-            if geometry.Transform(coordinate_transform) != 0:
-                raise RuntimeError("Could not transform natural polygon to WGS84")
-            output_feature = ogr.Feature(output_definition)
-            output_feature.SetGeometry(geometry)
-            output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
-            if output_layer.CreateFeature(output_feature) != 0:
-                raise RuntimeError(f"Could not write feature to {output_path}")
-            output_feature = None
+        for pixel_value, geometries in geometries_by_pixel.items():
+            dissolved = union_all(geometries)
+            dissolved_geometries = (
+                dissolved.geoms
+                if dissolved.geom_type == "MultiPolygon"
+                else (dissolved,)
+            )
+            for dissolved_geometry in dissolved_geometries:
+                if dissolved_geometry.is_empty:
+                    continue
+                geometry = ogr.CreateGeometryFromWkb(to_wkb(dissolved_geometry))
+                if geometry is None:
+                    raise RuntimeError("Could not convert dissolved natural polygon")
+                if geometry.Transform(coordinate_transform) != 0:
+                    raise RuntimeError("Could not transform natural polygon to WGS84")
+                output_feature = ogr.Feature(output_definition)
+                output_feature.SetGeometry(geometry)
+                output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
+                if output_layer.CreateFeature(output_feature) != 0:
+                    raise RuntimeError(f"Could not write feature to {output_path}")
+                output_feature = None
         output_data_source = None
     finally:
         if ordered_layer is not None:
