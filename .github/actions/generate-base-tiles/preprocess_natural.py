@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cell-size-meters",
         type=float,
-        default=1000.0,
+        default=300.0,
         help="Side length of the coarse projected raster cells, in meters.",
     )
     parser.add_argument(
@@ -202,7 +202,6 @@ def polygonize_natural_polygons(
             [1],
             source_layer,
             burn_values=[pixel_value],
-            options=["ALL_TOUCHED=TRUE"],
         ) != 0:
             raise RuntimeError(f"Could not rasterize natural class: {kind}")
 
