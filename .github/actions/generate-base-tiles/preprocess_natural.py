@@ -25,6 +25,24 @@ OSMIUM_FILTERS = (
     "wr/wetland=swamp,bog,wet_meadow,marsh",
 )
 
+NATURAL_PRIORITY = (
+    "grass",
+    "farmland",
+    "marsh",
+    "bog",
+    "wet_meadow",
+    "swamp",
+    "heath",
+    "scrub",
+    "sand",
+    "shingle",
+    "quarry",
+    "bare_rock",
+    "scree",
+    "glacier",
+    "forest",
+)
+
 NATURAL_CLASSIFICATION_SQL = """
 SELECT geometry,
     CASE
@@ -154,42 +172,47 @@ def polygonize_natural_polygons(
     pixel_value_field_index = output_layer.GetLayerDefn().GetFieldIndex("pixel_value")
 
     source_layer.SetAttributeFilter("kind IS NOT NULL")
-    kinds = sorted(
+    available_kinds = {
+        feature.GetField("kind")
+        for feature in source_layer
+        if feature.GetField("kind") is not None
+    }
+    kinds = [kind for kind in NATURAL_PRIORITY if kind in available_kinds]
+    kinds.extend(
         {
-            feature.GetField("kind")
-            for feature in source_layer
-            if feature.GetField("kind") is not None
+            kind for kind in available_kinds if kind not in NATURAL_PRIORITY
         }
     )
-    for kind in kinds:
+    for pixel_value, kind in enumerate(kinds, start=1):
         LOGGER.info("Rasterizing natural class: %s", kind)
-        raster_band.Fill(0)
         source_layer.SetAttributeFilter(f"kind = '{kind}'")
         if gdal.RasterizeLayer(
             raster,
             [1],
             source_layer,
-            burn_values=[1],
+            burn_values=[pixel_value],
             options=["ALL_TOUCHED=TRUE"],
         ) != 0:
             raise RuntimeError(f"Could not rasterize natural class: {kind}")
-        output_layer.StartTransaction()
-        if gdal.Polygonize(
-            raster_band,
-            raster_band.GetMaskBand(),
-            output_layer,
-            pixel_value_field_index,
-            ["8CONNECTED=8"],
-        ) != 0:
-            output_layer.RollbackTransaction()
-            raise RuntimeError(f"Could not polygonize natural class: {kind}")
-        output_layer.CommitTransaction()
-        output_layer.ResetReading()
-        for feature in output_layer:
-            if feature.GetField("pixel_value") == 1 and not feature.GetField("kind"):
-                feature.SetField("kind", kind)
-                output_layer.SetFeature(feature)
-        output_layer.ResetReading()
+
+    if gdal.Polygonize(
+        raster_band,
+        raster_band.GetMaskBand(),
+        output_layer,
+        pixel_value_field_index,
+        ["8CONNECTED=8"],
+    ) != 0:
+        raise RuntimeError("Could not polygonize natural classes")
+    output_layer.ResetReading()
+    kind_by_pixel_value = dict(enumerate(kinds, start=1))
+    for feature in output_layer:
+        kind = kind_by_pixel_value.get(feature.GetField("pixel_value"))
+        if kind is None:
+            output_layer.DeleteFeature(feature.GetFID())
+            continue
+        feature.SetField("kind", kind)
+        output_layer.SetFeature(feature)
+    output_layer.ResetReading()
 
     source_layer.SetAttributeFilter(None)
     output.FlushCache()
