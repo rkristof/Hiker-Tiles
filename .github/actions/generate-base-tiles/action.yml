@@ -44,8 +44,8 @@ runs:
           .github/actions/generate-base-tiles/preprocess_natural.py \
           --input tiles-latest.osm.pbf \
           --output natural-low.geojsonseq \
-          --cell-size-meters 500 \
-          --min-area-m2 10000
+          --cell-size-meters 300 \
+          --min-area-m2 250000
 
     - name: Download Tilemaker binary
       shell: bash
