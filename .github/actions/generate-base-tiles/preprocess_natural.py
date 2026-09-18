@@ -227,10 +227,10 @@ def polygonize_natural_polygons(
             raise RuntimeError("Could not rasterize natural classes")
         raster_band.FlushCache()
 
-        geojson_driver = ogr.GetDriverByName("GeoJSONSeq")
+        polygon_driver = ogr.GetDriverByName("FlatGeobuf")
         if polygonized_path.exists():
             polygonized_path.unlink()
-        polygonized = geojson_driver.CreateDataSource(str(polygonized_path))
+        polygonized = polygon_driver.CreateDataSource(str(polygonized_path))
         if polygonized is None:
             raise RuntimeError(f"Could not create {polygonized_path}")
         spatial_ref = osr.SpatialReference()
@@ -269,7 +269,7 @@ def polygonize_natural_polygons(
                 "-sql",
                 "SELECT geometry, CASE pixel_value "
                 f"{kind_case} END AS kind "
-                f'FROM "{polygonized_path.stem}" WHERE pixel_value > 0',
+                "FROM natural_low WHERE pixel_value > 0",
                 "-nln",
                 "natural_low",
                 "-nlt",
@@ -313,7 +313,7 @@ def main() -> None:
     filtered_pbf = args.workdir / "natural-filtered.osm.pbf"
     filter_file = args.workdir / "natural-filters.txt"
     raster_path = args.workdir / "natural-raster.tif"
-    polygonized_path = args.workdir / "natural-polygonized.geojsonseq"
+    polygonized_path = args.workdir / "natural-polygonized.fgb"
 
     filter_file.write_text("\n".join(OSMIUM_FILTERS) + "\n", encoding="utf-8")
 
