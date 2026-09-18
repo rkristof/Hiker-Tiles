@@ -16,6 +16,7 @@ from typing import Iterator
 from osgeo import gdal, ogr, osr
 
 LOGGER = logging.getLogger("preprocess_natural")
+MAX_WGS84_METERS_PER_DEGREE = 112000.0
 
 OSMIUM_FILTERS = (
     "wr/landuse=forest,grass,farmland,meadow,orchard,vineyard,farmyard,"
@@ -68,6 +69,10 @@ WHERE (
          OR natural IN ('wood', 'grassland', 'glacier', 'bare_rock', 'sand', 'heath', 'scrub', 'scree', 'shingle', 'wetland', 'fell', 'beach')
             OR HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh')
 )
+AND ST_Area(ST_Envelope(geometry))
+    * {max_wgs84_meters_per_degree}
+    * {max_wgs84_meters_per_degree} >= {min_area_m2}
+AND ST_Area(ST_Transform(geometry, 3035)) >= {min_area_m2}
 """
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1000.0,
         help="Side length of the coarse projected raster cells, in meters.",
+    )
+    parser.add_argument(
+        "--min-area-m2",
+        type=float,
+        default=25000.0,
+        help="Minimum source polygon area retained before rasterization.",
     )
     return parser.parse_args()
 
@@ -230,6 +241,8 @@ def main() -> None:
         raise FileNotFoundError(f"Input file does not exist: {args.input}")
     if args.cell_size_meters <= 0:
         raise ValueError("--cell-size-meters must be positive")
+    if args.min_area_m2 < 0:
+        raise ValueError("--min-area-m2 cannot be negative")
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +279,10 @@ def main() -> None:
                 "-dialect",
                 "SQLite",
                 "-sql",
-                NATURAL_CLASSIFICATION_SQL,
+                NATURAL_CLASSIFICATION_SQL.format(
+                    min_area_m2=f"{args.min_area_m2:.12g}",
+                    max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
+                ),
                 "-nln",
                 "natural",
                 "-nlt",
