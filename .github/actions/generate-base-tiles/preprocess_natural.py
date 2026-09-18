@@ -15,6 +15,9 @@ from typing import Iterator
 
 from osgeo import gdal, ogr, osr
 
+gdal.UseExceptions()
+ogr.UseExceptions()
+
 LOGGER = logging.getLogger("preprocess_natural")
 MAX_WGS84_METERS_PER_DEGREE = 112000.0
 
@@ -149,6 +152,7 @@ def polygonize_natural_polygons(
     materialized = None
     raster = None
     polygonized = None
+    output_data_source = None
     try:
         ordered_layer = source.ExecuteSQL(
             NATURAL_CLASSIFICATION_SQL.format(
@@ -203,6 +207,7 @@ def polygonize_natural_polygons(
             raise RuntimeError("Could not create in-memory polygonized layer")
         spatial_ref = osr.SpatialReference()
         spatial_ref.ImportFromEPSG(3035)
+        spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         polygonized_layer = polygonized.CreateLayer(
             "natural_low", spatial_ref, ogr.wkbPolygon
         )
@@ -220,37 +225,56 @@ def polygonize_natural_polygons(
         ) != 0:
             raise RuntimeError("Could not polygonize natural classes")
 
-        kind_case = " ".join(
-            f"WHEN {pixel_value} THEN '{kind}'"
-            for pixel_value, kind in enumerate(NATURAL_PRIORITY, start=1)
+        output_driver = ogr.GetDriverByName("GeoJSONSeq")
+        if output_driver is None:
+            raise RuntimeError("GeoJSONSeq driver not available")
+        if output_path.exists():
+            output_path.unlink()
+        output_data_source = output_driver.CreateDataSource(str(output_path))
+        if output_data_source is None:
+            raise RuntimeError(f"Could not create {output_path}")
+
+        wgs84 = osr.SpatialReference()
+        wgs84.ImportFromEPSG(4326)
+        wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        coordinate_transform = osr.CoordinateTransformation(
+            spatial_ref, wgs84
         )
-        translated = gdal.VectorTranslate(
-            str(output_path),
-            polygonized,
-            options=gdal.VectorTranslateOptions(
-                format="GeoJSONSeq",
-                accessMode="overwrite",
-                SQLStatement=(
-                    "SELECT geometry, CASE pixel_value "
-                    f"{kind_case} END AS kind "
-                    "FROM natural_low WHERE pixel_value > 0"
-                ),
-                SQLDialect="SQLite",
-                layerName="natural_low",
-                geometryType="POLYGON",
-                dstSRS="EPSG:4326",
-                layerCreationOptions=["RS=NO", "COORDINATE_PRECISION=6"],
-            ),
+        output_layer = output_data_source.CreateLayer(
+            "natural_low",
+            wgs84,
+            ogr.wkbPolygon,
+            options=["RS=NO", "COORDINATE_PRECISION=6"],
         )
-        if translated is None:
-            raise RuntimeError(f"Could not export {output_path}")
-        translated = None
+        if output_layer is None:
+            raise RuntimeError("Could not create GeoJSONSeq layer")
+        output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
+        output_definition = output_layer.GetLayerDefn()
+
+        polygonized_layer.ResetReading()
+        for feature in polygonized_layer:
+            pixel_value = feature.GetFieldAsInteger("pixel_value")
+            if pixel_value == 0:
+                continue
+            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
+                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
+            geometry = feature.GetGeometryRef().Clone()
+            if geometry.Transform(coordinate_transform) != 0:
+                raise RuntimeError("Could not transform natural polygon to WGS84")
+            output_feature = ogr.Feature(output_definition)
+            output_feature.SetGeometry(geometry)
+            output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
+            if output_layer.CreateFeature(output_feature) != 0:
+                raise RuntimeError(f"Could not write feature to {output_path}")
+            output_feature = None
+        output_data_source = None
     finally:
         if ordered_layer is not None:
             source.ReleaseResultSet(ordered_layer)
         materialized = None
         raster = None
         polygonized = None
+        output_data_source = None
         source = None
 
 
