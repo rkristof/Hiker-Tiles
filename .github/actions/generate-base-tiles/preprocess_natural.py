@@ -168,7 +168,7 @@ def polygonize_natural_polygons(
             projected_source = gdal.VectorTranslate(
                 "",
                 source,
-                format="MEM",
+                format="Memory",
                 accessMode="overwrite",
                 dstSRS="EPSG:3035",
                 SQLStatement=classification_sql(min_area_m2),
