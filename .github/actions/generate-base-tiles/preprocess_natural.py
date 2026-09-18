@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preprocess classified natural polygons for low-zoom tile generation."""
+"""Rasterize natural polygons for low-zoom tile generation."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ NATURAL_PRIORITY = (
 )
 
 NATURAL_CLASSIFICATION_SQL = """
-SELECT geometry,
+    SELECT ST_Transform(geometry, 3035) AS geometry,
     CASE
         WHEN landuse IN ('forest', 'grass', 'farmland') THEN landuse
         WHEN natural = 'wood' THEN 'forest'
@@ -146,7 +146,7 @@ def run_command(command: list[str]) -> None:
 
 
 def ensure_tools() -> None:
-    for tool in ("osmium", "ogr2ogr"):
+    for tool in ("osmium",):
         if shutil.which(tool) is None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
@@ -156,76 +156,126 @@ def polygonize_natural_polygons(
     output_path: Path,
     raster_path: Path,
     cell_size_meters: float,
+    min_area_m2: float,
 ) -> None:
-    """Rasterize priority-ordered natural polygons and polygonize occupied cells."""
+    """Rasterize classified PBF geometries and export occupied cells."""
     source = ogr.Open(str(input_path))
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
-    source_layer = source.GetLayerByName("natural")
+    source_layer = source.GetLayerByName("multipolygons")
     if source_layer is None:
-        raise RuntimeError(f"Layer natural not found in {input_path}")
+        raise RuntimeError(f"Layer multipolygons not found in {input_path}")
 
-    min_x, max_x, min_y, max_y = source_layer.GetExtent()
-    origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
-    origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
-    width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
-    height = max(1, math.ceil((origin_y - min_y) / cell_size_meters))
-
-    raster_driver = gdal.GetDriverByName("GTiff")
-    raster = raster_driver.Create(
-        str(raster_path),
-        width,
-        height,
-        1,
-        gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES"],
-    )
-    if raster is None:
-        raise RuntimeError(f"Could not create {raster_path}")
-    raster.SetGeoTransform((origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters))
-    raster.SetProjection("EPSG:3035")
-    raster_band = raster.GetRasterBand(1)
-    raster_band.SetNoDataValue(0)
-
-    output_driver = ogr.GetDriverByName("GPKG")
-    if output_path.exists():
-        output_driver.DeleteDataSource(str(output_path))
-    output = output_driver.CreateDataSource(str(output_path))
-    if output is None:
-        raise RuntimeError(f"Could not create {output_path}")
-    spatial_ref = osr.SpatialReference()
-    spatial_ref.ImportFromEPSG(3035)
-    output_layer = output.CreateLayer("natural_low", spatial_ref, ogr.wkbPolygon)
-    output_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
-    pixel_value_field_index = output_layer.GetLayerDefn().GetFieldIndex("pixel_value")
-
-    ordered_layer = source.ExecuteSQL(
-        "SELECT * FROM natural ORDER BY pixel_value ASC"
-    )
-    if ordered_layer is None:
-        raise RuntimeError("Could not order natural polygons by pixel value")
-    if gdal.RasterizeLayer(
-        raster,
-        [1],
-        ordered_layer,
-        options=["ATTRIBUTE=pixel_value"],
-    ) != 0:
-        source.ReleaseResultSet(ordered_layer)
-        raise RuntimeError("Could not rasterize natural classes")
-    source.ReleaseResultSet(ordered_layer)
-
-    if gdal.Polygonize(
-        raster_band,
-        raster_band.GetMaskBand(),
-        output_layer,
-        pixel_value_field_index,
-        ["8CONNECTED=8"],
-    ) != 0:
-        raise RuntimeError("Could not polygonize natural classes")
-    output.FlushCache()
+    ordered_layer = None
     raster = None
+    polygonized = None
     output = None
-    source = None
+    try:
+        ordered_layer = source.ExecuteSQL(
+            NATURAL_CLASSIFICATION_SQL.format(
+                min_area_m2=f"{min_area_m2:.12g}",
+                max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
+            )
+            + "\nORDER BY pixel_value ASC",
+            dialect="SQLite",
+        )
+        if ordered_layer is None:
+            raise RuntimeError("Could not classify natural polygons")
+
+        min_x, max_x, min_y, max_y = ordered_layer.GetExtent()
+        origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
+        origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
+        width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
+        height = max(1, math.ceil((origin_y - min_y) / cell_size_meters))
+
+        raster_driver = gdal.GetDriverByName("GTiff")
+        raster = raster_driver.Create(
+            str(raster_path),
+            width,
+            height,
+            1,
+            gdal.GDT_Byte,
+            options=["COMPRESS=LZW", "TILED=YES"],
+        )
+        if raster is None:
+            raise RuntimeError(f"Could not create {raster_path}")
+        raster.SetGeoTransform(
+            (origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters)
+        )
+        raster.SetProjection("EPSG:3035")
+        raster_band = raster.GetRasterBand(1)
+        raster_band.SetNoDataValue(0)
+        raster_band.Fill(0)
+
+        if gdal.RasterizeLayer(
+            raster,
+            [1],
+            ordered_layer,
+            options=["ATTRIBUTE=pixel_value"],
+        ) != 0:
+            raise RuntimeError("Could not rasterize natural classes")
+        raster_band.FlushCache()
+
+        memory_driver = ogr.GetDriverByName("Memory")
+        polygonized = memory_driver.CreateDataSource("natural_polygonized")
+        if polygonized is None:
+            raise RuntimeError("Could not create in-memory polygonized layer")
+        spatial_ref = osr.SpatialReference()
+        spatial_ref.ImportFromEPSG(3035)
+        polygonized_layer = polygonized.CreateLayer(
+            "natural_low", spatial_ref, ogr.wkbPolygon
+        )
+        polygonized_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
+        pixel_value_field_index = polygonized_layer.GetLayerDefn().GetFieldIndex(
+            "pixel_value"
+        )
+
+        if gdal.Polygonize(
+            raster_band,
+            raster_band.GetMaskBand(),
+            polygonized_layer,
+            pixel_value_field_index,
+            ["8CONNECTED=8"],
+        ) != 0:
+            raise RuntimeError("Could not polygonize natural classes")
+
+        geojson_driver = ogr.GetDriverByName("GeoJSONSeq")
+        if output_path.exists():
+            output_path.unlink()
+        output = geojson_driver.CreateDataSource(str(output_path))
+        if output is None:
+            raise RuntimeError(f"Could not create {output_path}")
+        wgs84 = osr.SpatialReference()
+        wgs84.ImportFromEPSG(4326)
+        output_layer = output.CreateLayer(
+            "natural_low",
+            wgs84,
+            ogr.wkbPolygon,
+            options=["RS=NO", "COORDINATE_PRECISION=6"],
+        )
+        output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
+        output_defn = output_layer.GetLayerDefn()
+        polygonized_layer.ResetReading()
+        for feature in polygonized_layer:
+            pixel_value = feature.GetFieldAsInteger("pixel_value")
+            if pixel_value <= 0 or pixel_value > len(NATURAL_PRIORITY):
+                continue
+            geometry = feature.GetGeometryRef().Clone()
+            if geometry.TransformTo(wgs84) != 0:
+                raise RuntimeError("Could not transform polygonized natural geometry")
+            output_feature = ogr.Feature(output_defn)
+            output_feature.SetGeometry(geometry)
+            output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
+            if output_layer.CreateFeature(output_feature) != 0:
+                raise RuntimeError("Could not write polygonized natural feature")
+        output.FlushCache()
+    finally:
+        if ordered_layer is not None:
+            source.ReleaseResultSet(ordered_layer)
+        raster = None
+        polygonized = None
+        output = None
+        source = None
 
 
 def main() -> None:
@@ -245,9 +295,7 @@ def main() -> None:
 
     filtered_pbf = args.workdir / "natural-filtered.osm.pbf"
     filter_file = args.workdir / "natural-filters.txt"
-    valid_gpkg = args.workdir / "natural-valid.gpkg"
     raster_path = args.workdir / "natural-raster.tif"
-    polygonized_gpkg = args.workdir / "natural-polygonized.gpkg"
 
     filter_file.write_text("\n".join(OSMIUM_FILTERS) + "\n", encoding="utf-8")
 
@@ -264,79 +312,13 @@ def main() -> None:
             ]
         )
 
-    with timed_step("classify and convert to EPSG:3035 GeoPackage"):
-        run_command(
-            [
-                "ogr2ogr",
-                "-f",
-                "GPKG",
-                str(valid_gpkg),
-                str(filtered_pbf),
-                "-dialect",
-                "SQLite",
-                "-sql",
-                NATURAL_CLASSIFICATION_SQL.format(
-                    min_area_m2=f"{args.min_area_m2:.12g}",
-                    max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.12g}",
-                ),
-                "-nln",
-                "natural",
-                "-nlt",
-                "PROMOTE_TO_MULTI",
-                "-dim",
-                "XY",
-                "-s_srs",
-                "EPSG:4326",
-                "-t_srs",
-                "EPSG:3035",
-                "-makevalid",
-                "-lco",
-                "SPATIAL_INDEX=NO",
-                "-gt",
-                "1000000",
-                "-overwrite",
-            ]
-        )
-
-    with timed_step("rasterize and polygonize natural classes"):
+    with timed_step("classify, rasterize, and polygonize natural classes"):
         polygonize_natural_polygons(
-            valid_gpkg,
-            polygonized_gpkg,
+            filtered_pbf,
+            args.output,
             raster_path,
             args.cell_size_meters,
-        )
-
-    with timed_step("export polygonized natural layer as WGS84 GeoJSONSeq"):
-        kind_case = " ".join(
-            f"WHEN {pixel_value} THEN '{kind}'"
-            for pixel_value, kind in enumerate(NATURAL_PRIORITY, start=1)
-        )
-        run_command(
-            [
-                "ogr2ogr",
-                "-f",
-                "GeoJSONSeq",
-                str(args.output),
-                str(polygonized_gpkg),
-                "-dialect",
-                "SQLite",
-                "-sql",
-                "SELECT geom, CASE pixel_value "
-                f"{kind_case} END AS kind "
-                "FROM natural_low WHERE pixel_value > 0",
-                "-nln",
-                "natural_low",
-                "-nlt",
-                "POLYGON",
-                "-explodecollections",
-                "-t_srs",
-                "EPSG:4326",
-                "-lco",
-                "RS=NO",
-                "-lco",
-                "COORDINATE_PRECISION=6",
-                "-overwrite",
-            ]
+            args.min_area_m2,
         )
 
     LOGGER.info("Natural preprocessing complete: %s", args.output)
