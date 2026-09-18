@@ -45,7 +45,7 @@ NATURAL_PRIORITY = (
 )
 
 NATURAL_CLASSIFICATION_SQL = """
-    SELECT geometry,
+    SELECT {geometry_expression},
     CASE
         WHEN landuse IN ('forest', 'grass', 'farmland') THEN
             CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 12 END
@@ -70,7 +70,7 @@ WHERE (
          OR natural IN ('wood', 'grassland', 'glacier', 'bare_rock', 'sand', 'heath', 'scrub', 'scree', 'shingle', 'wetland', 'fell', 'beach')
             OR HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh')
 )
-AND ST_Area(ST_Envelope(geometry))
+AND ST_Area(geometry)
     * {max_wgs84_meters_per_degree}
     * {max_wgs84_meters_per_degree} >= {min_area_m2}
 """
@@ -100,13 +100,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cell-size-meters",
         type=float,
-        default=500.0,
+        default=300.0,
         help="Side length of the coarse projected raster cells, in meters.",
     )
     parser.add_argument(
         "--min-area-m2",
         type=float,
-        default=25000.0,
+        default=250000.0,
         help="Minimum source polygon area retained before rasterization.",
     )
     return parser.parse_args()
@@ -127,14 +127,22 @@ def run_command(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def memory_vector_driver() -> ogr.Driver:
+    return ogr.GetDriverByName("MEM") or ogr.GetDriverByName("Memory")
+
+
 def ensure_tools() -> None:
     for tool in ("osmium",):
         if shutil.which(tool) is None:
             raise RuntimeError(f"Required executable not found: {tool}")
 
 
-def memory_vector_driver() -> ogr.Driver:
-    return ogr.GetDriverByName("MEM") or ogr.GetDriverByName("Memory")
+def classification_sql(min_area_m2: float) -> str:
+    return NATURAL_CLASSIFICATION_SQL.format(
+        geometry_expression="geometry",
+        min_area_m2=f"{min_area_m2:.12g}",
+        max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.1f}",
+    ).strip()
 
 
 def polygonize_natural_polygons(
@@ -148,201 +156,163 @@ def polygonize_natural_polygons(
     source = ogr.Open(str(input_path))
     if source is None:
         raise RuntimeError(f"Could not open {input_path}")
-    source_layer = source.GetLayerByName("multipolygons")
-    if source_layer is None:
-        raise RuntimeError(f"Layer multipolygons not found in {input_path}")
 
-    ordered_layer = None
-    materialized = None
-    materialized_layers: list[ogr.Layer] = []
+    projected_source = None
+    projected_layer = None
+    selected_layer = None
     raster = None
     polygonized = None
     output_data_source = None
     try:
-        ordered_layer = source.ExecuteSQL(
-            NATURAL_CLASSIFICATION_SQL.format(
-                min_area_m2=f"{min_area_m2:.12g}",
-                max_wgs84_meters_per_degree=f"{MAX_WGS84_METERS_PER_DEGREE:.1f}",
-            ).strip(),
-            dialect="SQLite",
-        )
-        if ordered_layer is None:
-            raise RuntimeError("Could not classify natural polygons")
-
-        memory_driver = memory_vector_driver()
-        if memory_driver is None:
-            raise RuntimeError("No in-memory vector driver available")
-        materialized = memory_driver.CreateDataSource("natural_classified")
-        if materialized is None:
-            raise RuntimeError("Could not create in-memory classified layer")
-        projected_spatial_ref = osr.SpatialReference()
-        projected_spatial_ref.ImportFromEPSG(3035)
-        projected_spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        source_spatial_ref = source_layer.GetSpatialRef()
-        if source_spatial_ref is None:
-            raise RuntimeError("Input layer has no spatial reference")
-        source_spatial_ref = source_spatial_ref.Clone()
-        source_spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        source_to_projected = osr.CoordinateTransformation(
-            source_spatial_ref, projected_spatial_ref
-        )
-        for pixel_value in range(1, len(NATURAL_PRIORITY) + 1):
-            materialized_layer = materialized.CreateLayer(
-                f"natural_{pixel_value}", projected_spatial_ref, ogr.wkbUnknown
+        with timed_step("project and classify natural polygons"):
+            projected_source = gdal.VectorTranslate(
+                "",
+                source,
+                format="MEM",
+                accessMode="overwrite",
+                dstSRS="EPSG:3035",
+                SQLStatement=classification_sql(min_area_m2),
+                SQLDialect="SQLite",
+                layerName="natural_classified",
             )
-            if materialized_layer is None:
-                raise RuntimeError("Could not create in-memory classified layer")
-            materialized_layers.append(materialized_layer)
-
-        for source_feature in ordered_layer:
-            pixel_value = source_feature.GetFieldAsInteger("pixel_value")
-            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
-                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
-            source_geometry = source_feature.GetGeometryRef()
-            if source_geometry is None:
-                continue
-            geometry = source_geometry.Clone()
-            if geometry.Transform(source_to_projected) != 0:
-                raise RuntimeError("Could not transform natural polygon to EPSG:3035")
-            if geometry.IsEmpty() or geometry.GetArea() < min_area_m2:
-                continue
-            materialized_layer = materialized_layers[pixel_value - 1]
-            materialized_feature = ogr.Feature(materialized_layer.GetLayerDefn())
-            materialized_feature.SetGeometry(geometry)
-            if materialized_layer.CreateFeature(materialized_feature) != 0:
-                raise RuntimeError("Could not materialize classified natural polygon")
-        source.ReleaseResultSet(ordered_layer)
-        ordered_layer = None
-
-        extents = [
-            layer.GetExtent()
-            for layer in materialized_layers
-            if layer.GetFeatureCount() > 0
-        ]
-        if extents:
-            min_x = min(extent[0] for extent in extents)
-            max_x = max(extent[1] for extent in extents)
-            min_y = min(extent[2] for extent in extents)
-            max_y = max(extent[3] for extent in extents)
-        else:
-            min_x = max_x = min_y = max_y = 0.0
+            if projected_source is None:
+                raise RuntimeError("Could not create projected natural dataset")
+            projected_layer = projected_source.GetLayerByName("natural_classified")
+            if projected_layer is None:
+                raise RuntimeError("Layer natural_classified not found")
+            selected_layer = projected_source.ExecuteSQL(
+                "SELECT geometry, pixel_value FROM natural_classified "
+                f"WHERE ST_Area(geometry) >= {min_area_m2:.12g} "
+                "ORDER BY pixel_value",
+                dialect="SQLite",
+            )
+            if selected_layer is None:
+                raise RuntimeError("Could not filter projected natural dataset")
+            projected_spatial_ref = selected_layer.GetSpatialRef()
+            if projected_spatial_ref is None:
+                raise RuntimeError("Projected natural layer has no spatial reference")
+            selected_layer.GetFeatureCount()
+            min_x, max_x, min_y, max_y = selected_layer.GetExtent()
         origin_x = math.floor(min_x / cell_size_meters) * cell_size_meters
         origin_y = math.ceil(max_y / cell_size_meters) * cell_size_meters
         width = max(1, math.ceil((max_x - origin_x) / cell_size_meters))
         height = max(1, math.ceil((origin_y - min_y) / cell_size_meters))
 
-        raster_driver = gdal.GetDriverByName("MEM")
-        raster = raster_driver.Create("", width, height, 1, gdal.GDT_Byte)
-        if raster is None:
-            raise RuntimeError("Could not create in-memory raster")
-        raster.SetGeoTransform(
-            (origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters)
-        )
-        raster.SetProjection("EPSG:3035")
-        raster_band = raster.GetRasterBand(1)
-        raster_band.SetNoDataValue(0)
-        raster_band.Fill(0)
+        with timed_step("rasterize natural classes"):
+            raster_driver = gdal.GetDriverByName("MEM")
+            raster = raster_driver.Create("", width, height, 1, gdal.GDT_Byte)
+            if raster is None:
+                raise RuntimeError("Could not create in-memory raster")
+            raster.SetGeoTransform(
+                (origin_x, cell_size_meters, 0, origin_y, 0, -cell_size_meters)
+            )
+            raster.SetProjection("EPSG:3035")
+            raster_band = raster.GetRasterBand(1)
+            raster_band.SetNoDataValue(0)
+            raster_band.Fill(0)
 
-        for pixel_value, materialized_layer in enumerate(materialized_layers, start=1):
-            if materialized_layer.GetFeatureCount() == 0:
-                continue
             if gdal.RasterizeLayer(
                 raster,
                 [1],
-                materialized_layer,
-                burn_values=[pixel_value],
+                selected_layer,
+                options=["ATTRIBUTE=pixel_value"],
             ) != 0:
                 raise RuntimeError("Could not rasterize natural classes")
 
-        polygonized = memory_driver.CreateDataSource("natural_polygonized")
-        if polygonized is None:
-            raise RuntimeError("Could not create in-memory polygonized layer")
-        spatial_ref = projected_spatial_ref
-        polygonized_layer = polygonized.CreateLayer(
-            "natural_low", spatial_ref, ogr.wkbPolygon
-        )
-        polygonized_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
-        pixel_value_field_index = polygonized_layer.GetLayerDefn().GetFieldIndex(
-            "pixel_value"
-        )
+        with timed_step("polygonize and export natural classes"):
+            memory_driver = memory_vector_driver()
+            if memory_driver is None:
+                raise RuntimeError("No in-memory vector driver available")
+            polygonized = memory_driver.CreateDataSource("natural_polygonized")
+            if polygonized is None:
+                raise RuntimeError("Could not create in-memory polygonized layer")
+            spatial_ref = projected_spatial_ref
+            polygonized_layer = polygonized.CreateLayer(
+                "natural_low", spatial_ref, ogr.wkbPolygon
+            )
+            polygonized_layer.CreateField(ogr.FieldDefn("pixel_value", ogr.OFTInteger))
+            pixel_value_field_index = polygonized_layer.GetLayerDefn().GetFieldIndex(
+                "pixel_value"
+            )
 
-        if gdal.Polygonize(
-            raster_band,
-            raster_band.GetMaskBand(),
-            polygonized_layer,
-            pixel_value_field_index,
-            ["8CONNECTED=8"],
-        ) != 0:
-            raise RuntimeError("Could not polygonize natural classes")
+            if gdal.Polygonize(
+                raster_band,
+                raster_band.GetMaskBand(),
+                polygonized_layer,
+                pixel_value_field_index,
+                ["8CONNECTED=8"],
+            ) != 0:
+                raise RuntimeError("Could not polygonize natural classes")
 
-        output_driver = ogr.GetDriverByName("GeoJSONSeq")
-        if output_driver is None:
-            raise RuntimeError("GeoJSONSeq driver not available")
-        if output_path.exists():
-            output_path.unlink()
-        output_data_source = output_driver.CreateDataSource(str(output_path))
-        if output_data_source is None:
-            raise RuntimeError(f"Could not create {output_path}")
+            output_driver = ogr.GetDriverByName("GeoJSONSeq")
+            if output_driver is None:
+                raise RuntimeError("GeoJSONSeq driver not available")
+            if output_path.exists():
+                output_path.unlink()
+            output_data_source = output_driver.CreateDataSource(str(output_path))
+            if output_data_source is None:
+                raise RuntimeError(f"Could not create {output_path}")
 
-        wgs84 = osr.SpatialReference()
-        wgs84.ImportFromEPSG(4326)
-        wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        coordinate_transform = osr.CoordinateTransformation(
-            spatial_ref, wgs84
-        )
-        output_layer = output_data_source.CreateLayer(
-            "natural_low",
-            wgs84,
-            ogr.wkbPolygon,
-            options=["RS=NO", "COORDINATE_PRECISION=6"],
-        )
-        if output_layer is None:
-            raise RuntimeError("Could not create GeoJSONSeq layer")
-        output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
-        output_definition = output_layer.GetLayerDefn()
+            wgs84 = osr.SpatialReference()
+            wgs84.ImportFromEPSG(4326)
+            wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            coordinate_transform = osr.CoordinateTransformation(
+                spatial_ref, wgs84
+            )
+            output_layer = output_data_source.CreateLayer(
+                "natural_low",
+                wgs84,
+                ogr.wkbPolygon,
+                options=["RS=NO", "COORDINATE_PRECISION=6"],
+            )
+            if output_layer is None:
+                raise RuntimeError("Could not create GeoJSONSeq layer")
+            output_layer.CreateField(ogr.FieldDefn("kind", ogr.OFTString))
+            output_definition = output_layer.GetLayerDefn()
 
-        polygonized_layer.ResetReading()
-        for feature in polygonized_layer:
-            pixel_value = feature.GetFieldAsInteger("pixel_value")
-            if pixel_value == 0:
-                continue
-            if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
-                raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
-            source_geometry = feature.GetGeometryRef()
-            if source_geometry is None or source_geometry.IsEmpty():
-                continue
-            geometry = source_geometry.Clone()
-            gdal.PushErrorHandler("CPLQuietErrorHandler")
-            try:
-                geometry_is_valid = geometry.IsValid()
-            finally:
-                gdal.PopErrorHandler()
-            if not geometry_is_valid:
-                geometry = geometry.MakeValid()
-                if geometry is None or geometry.IsEmpty():
+            polygonized_layer.ResetReading()
+            for feature in polygonized_layer:
+                pixel_value = feature.GetFieldAsInteger("pixel_value")
+                if pixel_value == 0:
                     continue
-            if geometry.Transform(coordinate_transform) != 0:
-                raise RuntimeError("Could not transform natural polygon to WGS84")
-            if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbMultiPolygon:
-                output_geometries = (
-                    geometry.GetGeometryRef(index).Clone()
-                    for index in range(geometry.GetGeometryCount())
-                )
-            else:
-                output_geometries = (geometry,)
-            for output_geometry in output_geometries:
-                output_feature = ogr.Feature(output_definition)
-                output_feature.SetGeometry(output_geometry)
-                output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
-                if output_layer.CreateFeature(output_feature) != 0:
-                    raise RuntimeError(f"Could not write feature to {output_path}")
-                output_feature = None
+                if not 1 <= pixel_value <= len(NATURAL_PRIORITY):
+                    raise RuntimeError(f"Unexpected natural pixel value: {pixel_value}")
+                source_geometry = feature.GetGeometryRef()
+                if source_geometry is None or source_geometry.IsEmpty():
+                    continue
+                geometry = source_geometry.Clone()
+                gdal.PushErrorHandler("CPLQuietErrorHandler")
+                try:
+                    geometry_is_valid = geometry.IsValid()
+                finally:
+                    gdal.PopErrorHandler()
+                if not geometry_is_valid:
+                    geometry = geometry.MakeValid()
+                    if geometry is None or geometry.IsEmpty():
+                        continue
+                if geometry.Transform(coordinate_transform) != 0:
+                    raise RuntimeError("Could not transform natural polygon to WGS84")
+                if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbMultiPolygon:
+                    output_geometries = (
+                        geometry.GetGeometryRef(index).Clone()
+                        for index in range(geometry.GetGeometryCount())
+                    )
+                else:
+                    output_geometries = (geometry,)
+                for output_geometry in output_geometries:
+                    output_feature = ogr.Feature(output_definition)
+                    output_feature.SetGeometry(output_geometry)
+                    output_feature.SetField("kind", NATURAL_PRIORITY[pixel_value - 1])
+                    if output_layer.CreateFeature(output_feature) != 0:
+                        raise RuntimeError(f"Could not write feature to {output_path}")
+                    output_feature = None
         output_data_source = None
     finally:
-        if ordered_layer is not None:
-            source.ReleaseResultSet(ordered_layer)
-        materialized_layers = []
-        materialized = None
+        if projected_source is not None and selected_layer is not None:
+            projected_source.ReleaseResultSet(selected_layer)
+        selected_layer = None
+        projected_layer = None
+        projected_source = None
         raster = None
         polygonized = None
         output_data_source = None
