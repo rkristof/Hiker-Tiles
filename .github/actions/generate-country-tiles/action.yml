@@ -150,10 +150,16 @@ runs:
         route_log="$diagnostics_dir/route-extraction.log"
         route_snapshot() {
           echo "--- route extraction snapshot $(date -u '+%Y-%m-%dT%H:%M:%SZ') ---"
-          echo "shell_pid=$$ child_pid=${route_pid:-unknown}"
+          echo "shell_pid=$$ shell_ppid=$PPID child_pid=${route_pid:-unknown}"
+          ps -o pid,ppid,pgid,sid,rss,vsz,stat,etime,comm,args -p $$,$PPID 2>&1 || true
           if [[ -n "${route_pid:-}" ]]; then
             ps -o pid,ppid,pgid,sid,rss,vsz,stat,etime,comm,args -p "$route_pid" || true
             pgrep -a -P "$route_pid" || true
+            route_pgid="$(ps -o pgid= -p "$route_pid" 2>/dev/null | tr -d ' ')"
+            if [[ -n "$route_pgid" ]]; then
+              echo "route process group $route_pgid:"
+              ps -eo pid,ppid,pgid,sid,rss,vsz,stat,etime,comm,args | awk -v pgid="$route_pgid" 'NR == 1 || $3 == pgid'
+            fi
           fi
           awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/' /proc/meminfo
           for file in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events; do
@@ -169,12 +175,19 @@ runs:
         route_signal() {
           signal="$1"
           echo "route extraction shell received SIG${signal} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          route_snapshot | tee -a "$route_log"
+          if [[ -n "${route_pid:-}" ]]; then
+            kill -0 "$route_pid" 2>&1
+            echo "child_alive_check_exit=$?"
+            jobs -l || true
+          fi
+          route_snapshot | tee -a "$diagnostics_dir/resources.log"
           echo "Last route extractor output:"
           tail -n 80 "$route_log" 2>/dev/null || true
           if [[ -n "${route_pid:-}" ]]; then
-            kill -TERM "$route_pid" 2>/dev/null || true
-            wait "$route_pid" 2>/dev/null || true
+            kill -TERM "$route_pid" 2>&1
+            echo "child_kill_exit=$?"
+            wait "$route_pid" 2>&1
+            echo "child_wait_exit=$?"
           fi
           rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
           exit $((128 + signal))
@@ -185,11 +198,17 @@ runs:
         set +e
         /usr/bin/time -v python3 -u .hiker-routes/extract_hiking_routes.py > "$route_log" 2>&1 &
         route_pid=$!
-        echo "route extractor started pid=$route_pid pgid=$(ps -o pgid= -p "$route_pid" | tr -d ' ')" | tee -a "$diagnostics_dir/phase.log"
+        route_pgid="$(ps -o pgid= -p "$route_pid" | tr -d ' ')"
+        echo "route extractor started pid=$route_pid pgid=$route_pgid shell_pid=$$ shell_ppid=$PPID" | tee -a "$diagnostics_dir/phase.log"
         while kill -0 "$route_pid" 2>/dev/null; do
           route_snapshot | tee -a "$diagnostics_dir/resources.log"
           sleep 30
         done
+        if kill -0 "$route_pid" 2>/dev/null; then
+          echo "child_alive_after_monitor_loop=yes" | tee -a "$diagnostics_dir/phase.log"
+        else
+          echo "child_alive_after_monitor_loop=no kill_check_exit=$?" | tee -a "$diagnostics_dir/phase.log"
+        fi
         wait "$route_pid"
         route_exit_code=$?
         set -e
