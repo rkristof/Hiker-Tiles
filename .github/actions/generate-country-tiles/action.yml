@@ -191,17 +191,23 @@ runs:
           signal="$1"
           echo "route extraction shell received SIG${signal} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           if [[ -n "${route_pid:-}" ]]; then
-            kill -0 "$route_pid" 2>&1
-            echo "child_alive_check_exit=$?"
+            if kill -0 "$route_pid" 2>/dev/null; then
+              echo "child_alive_check=yes"
+            else
+              echo "child_alive_check=no"
+            fi
             jobs -l || true
           fi
           route_snapshot | tee -a "$diagnostics_dir/resources.log"
           echo "Last route extractor output:"
           tail -n 80 "$route_log" 2>/dev/null || true
           if [[ -n "${route_pid:-}" ]]; then
-            kill -TERM "$route_pid" 2>&1
-            echo "child_kill_exit=$?"
-            wait "$route_pid" 2>&1
+            if kill -TERM "$route_pid" 2>/dev/null; then
+              echo "child_kill_sent=yes"
+            else
+              echo "child_kill_sent=no child_already_gone=yes"
+            fi
+            wait "$route_pid" 2>/dev/null
             echo "child_wait_exit=$?"
           fi
           rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
@@ -211,7 +217,7 @@ runs:
         trap 'route_signal 2' INT
         echo "route-extraction-start $(date -u '+%Y-%m-%dT%H:%M:%SZ')" | tee -a "$diagnostics_dir/phase.log"
         set +e
-        /usr/bin/time -v python3 -u .hiker-routes/extract_hiking_routes.py > "$route_log" 2>&1 &
+        setsid /usr/bin/time -v python3 -u .hiker-routes/extract_hiking_routes.py > "$route_log" 2>&1 &
         route_pid=$!
         route_pgid="$(ps -o pgid= -p "$route_pid" | tr -d ' ')"
         echo "route extractor started pid=$route_pid pgid=$route_pgid shell_pid=$$ shell_ppid=$PPID" | tee -a "$diagnostics_dir/phase.log"
