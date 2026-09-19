@@ -289,6 +289,9 @@ def polygonize_natural_polygons(
                     geometry = geometry.MakeValid()
                     if geometry is None or geometry.IsEmpty():
                         continue
+                geometry = geometry.SimplifyPreserveTopology(cell_size_meters)
+                if geometry is None or geometry.IsEmpty():
+                    continue
                 if geometry.Transform(coordinate_transform) != 0:
                     raise RuntimeError("Could not transform natural polygon to WGS84")
                 if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbMultiPolygon:
