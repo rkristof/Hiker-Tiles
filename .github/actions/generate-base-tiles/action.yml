@@ -124,4 +124,5 @@ runs:
         --bbox -180,-90,180,90 \
         --input tiles-latest.osm.pbf \
         --output base.mbtiles \
+        --fast \
         --threads "$(getconf _NPROCESSORS_ONLN)"
