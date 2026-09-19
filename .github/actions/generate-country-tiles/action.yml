@@ -75,7 +75,15 @@ runs:
         path: ~/.cache/pip
         key: pip-${{ runner.os }}-packages-v1
 
+    - name: Restore cached OSM extract
+      id: osm-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: tiles-latest.osm.pbf
+        key: osm-${{ runner.os }}-${{ inputs.country }}-v1
+
     - name: Download OSM extract
+      if: steps.osm-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
@@ -85,6 +93,13 @@ runs:
           "https://download.geofabrik.de/europe/${COUNTRY}-latest.osm.pbf" \
           -O tiles-latest.osm.pbf
         echo "Downloaded: $(du -sh tiles-latest.osm.pbf | cut -f1)"
+
+    - name: Cache OSM extract
+      if: steps.osm-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: tiles-latest.osm.pbf
+        key: osm-${{ runner.os }}-${{ inputs.country }}-v1
 
     - name: Install dependencies
       shell: bash
