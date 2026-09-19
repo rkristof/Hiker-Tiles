@@ -24,6 +24,41 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Start resource diagnostics
+      shell: bash
+      run: |
+        diagnostics_dir="${RUNNER_TEMP}/hiker-diagnostics"
+        mkdir -p "$diagnostics_dir"
+        printf 'run=%s\ncountry=%s\nrunner=%s\nstarted=%s\n' \
+          "${GITHUB_RUN_ID}" \
+          "${{ inputs.country }}" \
+          "${RUNNER_NAME}" \
+          "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+          > "$diagnostics_dir/run-info.txt"
+        : > "$diagnostics_dir/phase.log"
+        setsid nohup bash -c '
+          diagnostics_dir="$1"
+          while [[ ! -e "$diagnostics_dir/stop-monitor" ]]; do
+            {
+              printf "\n=== %s ===\n" "$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
+              awk "/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/" /proc/meminfo
+              for file in \
+                /sys/fs/cgroup/memory.current \
+                /sys/fs/cgroup/memory.peak \
+                /sys/fs/cgroup/memory.max \
+                /sys/fs/cgroup/memory.events; do
+                if [[ -r "$file" ]]; then
+                  echo "[$file]"
+                  cat "$file"
+                fi
+              done
+              ps -eo pid,ppid,rss,vsz,stat,etime,comm,args --sort=-rss | sed -n "1,20p"
+            } >> "$diagnostics_dir/resources.log" 2>&1
+            sleep 30
+          done
+        ' _ "$diagnostics_dir" > /dev/null 2>&1 < /dev/null &
+        echo "$!" > "$diagnostics_dir/monitor.pid"
+
     - name: Fix apt cache permissions
       shell: bash
       run: sudo mkdir -p /var/cache/apt/archives && sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
@@ -111,7 +146,63 @@ runs:
         osmium tags-filter tiles-latest.osm.pbf w/highway \
           -o highways-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
-        python3 .hiker-routes/extract_hiking_routes.py
+        diagnostics_dir="${RUNNER_TEMP}/hiker-diagnostics"
+        route_log="$diagnostics_dir/route-extraction.log"
+        route_snapshot() {
+          echo "--- route extraction snapshot $(date -u '+%Y-%m-%dT%H:%M:%SZ') ---"
+          echo "shell_pid=$$ child_pid=${route_pid:-unknown}"
+          if [[ -n "${route_pid:-}" ]]; then
+            ps -o pid,ppid,pgid,sid,rss,vsz,stat,etime,comm,args -p "$route_pid" || true
+            pgrep -a -P "$route_pid" || true
+          fi
+          awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/' /proc/meminfo
+          for file in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events; do
+            if [[ -r "$file" ]]; then
+              echo "[$file]"
+              cat "$file"
+            fi
+          done
+          ps -eo pid,ppid,pgid,rss,vsz,stat,etime,comm,args --sort=-rss | sed -n '1,12p'
+          echo "last route extractor output:"
+          tail -n 20 "$route_log" 2>/dev/null || true
+        }
+        route_signal() {
+          signal="$1"
+          echo "route extraction shell received SIG${signal} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          route_snapshot | tee -a "$route_log"
+          echo "Last route extractor output:"
+          tail -n 80 "$route_log" 2>/dev/null || true
+          if [[ -n "${route_pid:-}" ]]; then
+            kill -TERM "$route_pid" 2>/dev/null || true
+            wait "$route_pid" 2>/dev/null || true
+          fi
+          rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+          exit $((128 + signal))
+        }
+        trap 'route_signal 15' TERM
+        trap 'route_signal 2' INT
+        echo "route-extraction-start $(date -u '+%Y-%m-%dT%H:%M:%SZ')" | tee -a "$diagnostics_dir/phase.log"
+        set +e
+        /usr/bin/time -v python3 -u .hiker-routes/extract_hiking_routes.py > "$route_log" 2>&1 &
+        route_pid=$!
+        echo "route extractor started pid=$route_pid pgid=$(ps -o pgid= -p "$route_pid" | tr -d ' ')" | tee -a "$diagnostics_dir/phase.log"
+        while kill -0 "$route_pid" 2>/dev/null; do
+          route_snapshot | tee -a "$diagnostics_dir/resources.log"
+          sleep 30
+        done
+        wait "$route_pid"
+        route_exit_code=$?
+        set -e
+        echo "route extractor exited code=${route_exit_code} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')" | tee -a "$diagnostics_dir/phase.log"
+        cat "$route_log"
+        if [[ "$route_exit_code" -ge 128 ]]; then
+          echo "route extractor signal=$((route_exit_code - 128))"
+          route_snapshot | tee -a "$diagnostics_dir/resources.log"
+        fi
+        if [[ "$route_exit_code" -ne 0 ]]; then
+          rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+          exit "$route_exit_code"
+        fi
         rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
         echo "Natural points: $(wc -l < natural-points.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
@@ -221,3 +312,41 @@ runs:
             --notes "$NOTES" \
             "${COUNTRY}-tiles.tar.gz.enc"
         fi
+
+    - name: Collect resource diagnostics
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        diagnostics_dir="${RUNNER_TEMP}/hiker-diagnostics"
+        mkdir -p "$diagnostics_dir"
+        {
+          printf 'finished=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          printf 'job_status=%s\n' "${{ job.status }}"
+          printf '\n=== cgroup memory events ===\n'
+          for file in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.peak; do
+            if [[ -r "$file" ]]; then
+              echo "[$file]"
+              cat "$file"
+            fi
+          done
+          printf '\n=== kernel warnings and errors ===\n'
+          dmesg --level=warning,err 2>&1 | tail -n 200 || true
+        } > "$diagnostics_dir/final-diagnostics.txt"
+        touch "$diagnostics_dir/stop-monitor"
+        if [[ -s "$diagnostics_dir/monitor.pid" ]]; then
+          monitor_pid="$(cat "$diagnostics_dir/monitor.pid")"
+          kill -- "-${monitor_pid}" 2>/dev/null || kill "$monitor_pid" 2>/dev/null || true
+          for _ in {1..5}; do
+            kill -0 "$monitor_pid" 2>/dev/null || break
+            sleep 1
+          done
+        fi
+
+    - name: Upload resource diagnostics
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: hiker-diagnostics-${{ inputs.country }}-${{ github.run_id }}
+        path: ${{ runner.temp }}/hiker-diagnostics
+        if-no-files-found: warn
+        retention-days: 7

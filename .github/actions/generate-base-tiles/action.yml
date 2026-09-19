@@ -40,12 +40,65 @@ runs:
     - name: Preprocess natural polygons
       shell: bash
       run: |
-        python3 \
+        diagnostics_dir="${RUNNER_TEMP}/hiker-diagnostics"
+        mkdir -p "$diagnostics_dir"
+        natural_log="$diagnostics_dir/natural-preprocess.log"
+        natural_snapshot() {
+          echo "--- natural preprocessing snapshot $(date -u '+%Y-%m-%dT%H:%M:%SZ') ---"
+          echo "shell_pid=$$ child_pid=${natural_pid:-unknown}"
+          if [[ -n "${natural_pid:-}" ]]; then
+            ps -o pid,ppid,pgid,sid,rss,vsz,stat,etime,comm,args -p "$natural_pid" || true
+            pgrep -a -P "$natural_pid" || true
+          fi
+          awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/' /proc/meminfo
+          for file in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events; do
+            if [[ -r "$file" ]]; then
+              echo "[$file]"
+              cat "$file"
+            fi
+          done
+          ps -eo pid,ppid,pgid,rss,vsz,stat,etime,comm,args --sort=-rss | sed -n '1,12p'
+          echo "last natural preprocessing output:"
+          tail -n 20 "$natural_log" 2>/dev/null || true
+        }
+        natural_signal() {
+          signal="$1"
+          echo "natural preprocessing shell received SIG${signal} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          natural_snapshot | tee -a "$natural_log"
+          echo "Last natural preprocessing output:"
+          tail -n 80 "$natural_log" 2>/dev/null || true
+          if [[ -n "${natural_pid:-}" ]]; then
+            kill -TERM "$natural_pid" 2>/dev/null || true
+            wait "$natural_pid" 2>/dev/null || true
+          fi
+          exit $((128 + signal))
+        }
+        trap 'natural_signal 15' TERM
+        trap 'natural_signal 2' INT
+        echo "natural-preprocess-start $(date -u '+%Y-%m-%dT%H:%M:%SZ')" | tee -a "$diagnostics_dir/phase.log"
+        set +e
+        /usr/bin/time -v python3 -u \
           .github/actions/generate-base-tiles/preprocess_natural.py \
           --input tiles-latest.osm.pbf \
           --output natural-low.geojsonseq \
           --cell-size-meters 300 \
-          --min-area-m2 250000
+          --min-area-m2 250000 > "$natural_log" 2>&1 &
+        natural_pid=$!
+        echo "natural preprocessing started pid=$natural_pid pgid=$(ps -o pgid= -p "$natural_pid" | tr -d ' ')" | tee -a "$diagnostics_dir/phase.log"
+        while kill -0 "$natural_pid" 2>/dev/null; do
+          natural_snapshot | tee -a "$diagnostics_dir/resources.log"
+          sleep 30
+        done
+        wait "$natural_pid"
+        preprocess_exit_code=$?
+        set -e
+        echo "natural preprocessing exited code=${preprocess_exit_code} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')" | tee -a "$diagnostics_dir/phase.log"
+        cat "$natural_log"
+        if [[ "$preprocess_exit_code" -ge 128 ]]; then
+          echo "natural preprocessing signal=$((preprocess_exit_code - 128))"
+          natural_snapshot | tee -a "$diagnostics_dir/resources.log"
+        fi
+        exit "$preprocess_exit_code"
 
     - name: Download Tilemaker binary
       shell: bash
