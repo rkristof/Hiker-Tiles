@@ -280,6 +280,11 @@ def polygonize_natural_polygons(
                 if source_geometry is None or source_geometry.IsEmpty():
                     continue
                 geometry = source_geometry.Clone()
+                if geometry.GetArea() < min_area_m2:
+                    continue
+                geometry = geometry.Simplify(cell_size_meters)
+                if geometry is None or geometry.IsEmpty():
+                    continue
                 gdal.PushErrorHandler("CPLQuietErrorHandler")
                 try:
                     geometry_is_valid = geometry.IsValid()
@@ -289,9 +294,6 @@ def polygonize_natural_polygons(
                     geometry = geometry.MakeValid()
                     if geometry is None or geometry.IsEmpty():
                         continue
-                geometry = geometry.SimplifyPreserveTopology(cell_size_meters)
-                if geometry is None or geometry.IsEmpty():
-                    continue
                 if geometry.Transform(coordinate_transform) != 0:
                     raise RuntimeError("Could not transform natural polygon to WGS84")
                 if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbMultiPolygon:
