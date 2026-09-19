@@ -160,6 +160,16 @@ public:
         return selected_way_indices_;
     }
 
+    void release_source_data() {
+        std::unordered_set<Id>().swap(route_node_ids_);
+        std::unordered_set<Id>().swap(direct_node_ids_);
+        std::vector<LocationRecord>().swap(locations_);
+        std::vector<StoredWay>().swap(ways_);
+        std::vector<Id>().swap(way_node_ids_);
+        std::vector<std::uint8_t>().swap(direct_way_flags_);
+        std::vector<std::size_t>().swap(selected_way_indices_);
+    }
+
 private:
     void prepare_locations() {
         if (locations_sorted_) {
@@ -380,6 +390,9 @@ void write_output(
         }
     }
 
+    std::unordered_map<Id, std::uint32_t>().swap(node_indexes);
+    collector.release_source_data();
+
     std::vector<std::uint32_t> sorted_node_indexes(output_nodes.size());
     std::iota(sorted_node_indexes.begin(), sorted_node_indexes.end(), 0);
     std::sort(
@@ -398,11 +411,14 @@ void write_output(
         sorted_nodes.push_back(output_nodes[original_index]);
     }
     output_nodes.swap(sorted_nodes);
+    std::vector<OutputNode>().swap(sorted_nodes);
     for (auto& node_indexes_for_way : way_node_indexes) {
         for (auto& node_index : node_indexes_for_way) {
             node_index = remapped_node_indexes[node_index];
         }
     }
+    std::vector<std::uint32_t>().swap(sorted_node_indexes);
+    std::vector<std::uint32_t>().swap(remapped_node_indexes);
 
     std::vector<std::vector<OutputEdge>> adjacency(output_nodes.size());
     for (std::size_t way_index = 0; way_index < output_ways.size(); ++way_index) {
@@ -444,6 +460,7 @@ void write_output(
             adjacency[node_index].end()
         );
     }
+    std::vector<std::vector<OutputEdge>>().swap(adjacency);
 
     std::vector<SpatialIndexRef> spatial_refs;
     spatial_refs.reserve(output_nodes.size());
@@ -482,6 +499,7 @@ void write_output(
         spatial_entries.push_back(spatial_ref.node_index);
         ++spatial_cells.back().entry_count;
     }
+    std::vector<SpatialIndexRef>().swap(spatial_refs);
 
     const OutputCounts counts{
         output_nodes.size(),
