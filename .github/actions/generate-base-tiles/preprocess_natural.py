@@ -47,8 +47,9 @@ NATURAL_PRIORITY = (
 NATURAL_CLASSIFICATION_SQL = """
     SELECT {geometry_expression},
     CASE
-        WHEN landuse IN ('forest', 'grass', 'farmland') THEN
-            CASE landuse WHEN 'grass' THEN 1 WHEN 'farmland' THEN 2 ELSE 12 END
+        WHEN landuse = 'grass' THEN 1
+        WHEN landuse = 'farmland' THEN 2
+        WHEN landuse = 'forest' THEN 12
         WHEN natural = 'wood' THEN 12
         WHEN natural = 'grassland' OR landuse = 'meadow' THEN 1
         WHEN landuse IN ('orchard', 'vineyard', 'farmyard', 'greenhouse_horticulture', 'allotments') THEN 2
@@ -70,9 +71,7 @@ WHERE (
          OR natural IN ('wood', 'grassland', 'glacier', 'bare_rock', 'sand', 'heath', 'scrub', 'scree', 'shingle', 'wetland', 'fell', 'beach')
             OR HSTORE_GET_VALUE(other_tags, 'wetland') IN ('swamp', 'bog', 'wet_meadow', 'marsh')
 )
-AND ST_Area(geometry)
-    * {max_wgs84_meters_per_degree}
-    * {max_wgs84_meters_per_degree} >= {min_area_m2}
+AND ST_Area(geometry) * {max_wgs84_meters_per_degree} * {max_wgs84_meters_per_degree} >= {min_area_m2}
 """
 
 def parse_args() -> argparse.Namespace:
