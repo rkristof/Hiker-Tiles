@@ -107,6 +107,7 @@ runs:
         osmium tags-filter tiles-latest.osm.pbf \
           r/route=hiking r/route=foot r/route=mtb \
           n/place=city n/place=town n/place=village n/place=hamlet \
+          nw/tourism=viewpoint \
           n/natural=peak n/natural=cave_entrance n/natural=volcano \
           n/waterway=waterfall n/natural=spring \
           n/checkpoint=hiking nw/tourism=picnic_site \
@@ -173,9 +174,10 @@ runs:
         COUNTRY: ${{ inputs.country }}
         VERSION: ${{ inputs.version }}
       run: |
-        python3 .hiker-routes/inject_routes_metadata.py \
-          routes-meta.json "${COUNTRY}-hiking.mbtiles" "$VERSION"
+        python3 .hiker-routes/inject_metadata.py \
+          routes-meta.json pois-meta.json "${COUNTRY}-hiking.mbtiles" "$VERSION"
         rm routes-meta.json
+        rm pois-meta.json
 
     - name: Generate and embed OSMC symbol images
       uses: ./.github/actions/embed-osmc-symbols
