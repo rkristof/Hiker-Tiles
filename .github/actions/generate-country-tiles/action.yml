@@ -188,7 +188,8 @@ runs:
           --named-layer=contours:contours.geojson
         mv contours.mbtiles "${COUNTRY}-contours.mbtiles"
         echo "Contours tiles: $(du -sh "${COUNTRY}-contours.mbtiles" | cut -f1)"
-        rm contours.geojson elevation-tiles extent.poly
+        rm contours.geojson extent.poly
+        rm -rf elevation-tiles
         cp base.mbtiles "${COUNTRY}-base.mbtiles"
         echo "Base: $(du -sh "${COUNTRY}-base.mbtiles" | cut -f1)"
 
