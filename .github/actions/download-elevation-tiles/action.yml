@@ -30,11 +30,6 @@ runs:
           -O extent.poly
         echo "Downloaded: $(du -sh extent.poly | cut -f1)"
 
-    - name: Install GLO-30 tile selection dependency
-      shell: bash
-      run: |
-        pip3 install --quiet shapely
-
     - name: Select and download GLO-30 tiles
       id: download
       shell: bash

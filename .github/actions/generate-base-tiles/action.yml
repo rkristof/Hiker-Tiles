@@ -22,25 +22,16 @@ runs:
           libshp-dev \
           libsqlite3-dev \
           libsqlite3-mod-spatialite \
+          gdal-bin \
+          python3-gdal \
           libgdal-dev \
           osmium-tool \
-          python3-pip \
-          python3-dev
-
-    - name: Install GDAL Python bindings
-      shell: bash
-      run: |
-        GDAL_VERSION="$(gdal-config --version)"
-        pip3 install \
-          --user \
-          --break-system-packages \
-          --disable-pip-version-check \
-          "GDAL==${GDAL_VERSION}"
+          python3-pip
 
     - name: Preprocess natural polygons
       shell: bash
       run: |
-        python3 \
+        /usr/bin/python3 \
           .github/actions/generate-base-tiles/preprocess_natural.py \
           --input tiles-latest.osm.pbf \
           --output natural-low.geojsonseq \
