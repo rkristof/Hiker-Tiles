@@ -35,7 +35,7 @@
             "simplify_below": 14,
             "simplify_level": 0.00015,
             "filter_below": 14,
-            "filter_area": 0.5,
+            "filter_area": 0.1,
             "combine_lines_below": 14
         },
         "land": {
