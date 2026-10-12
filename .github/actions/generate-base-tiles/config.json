@@ -33,7 +33,7 @@
             "minzoom": 5,
             "maxzoom": 13,
             "simplify_below": 14,
-            "simplify_level": 0.00015,
+            "simplify_level": 0.0001,
             "filter_below": 14,
             "filter_area": 0.1,
             "combine_lines_below": 14
