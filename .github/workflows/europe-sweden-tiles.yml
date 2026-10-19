@@ -15,8 +15,8 @@ jobs:
       - name: Generate and publish country tiles
         uses: ./.github/actions/generate-country-tiles
         with:
-          continent: europe
           country: sweden
+          download_paths: europe/sweden
           version: ${{ vars.VERSION }}
           routes_token: ${{ secrets.HIKER_ROUTES_TOKEN }}
           tile_password: ${{ secrets.TILE_PASSWORD }}

@@ -1,0 +1,28 @@
+name: North America - Canada West Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate and publish country tiles
+        uses: ./.github/actions/generate-country-tiles
+        with:
+          country: canada-west
+          download_paths: |
+            north-america/canada/alberta
+            north-america/canada/british-columbia
+            north-america/canada/manitoba
+            north-america/canada/northwest-territories
+            north-america/canada/saskatchewan
+            north-america/canada/yukon
+          version: ${{ vars.VERSION }}
+          routes_token: ${{ secrets.HIKER_ROUTES_TOKEN }}
+          tile_password: ${{ secrets.TILE_PASSWORD }}
