@@ -1,0 +1,22 @@
+name: Asia - China Tiles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate and publish country tiles
+        uses: ./.github/actions/generate-country-tiles
+        with:
+          country: china
+          download_paths: asia/china
+          version: ${{ vars.VERSION }}
+          routes_token: ${{ secrets.HIKER_ROUTES_TOKEN }}
+          tile_password: ${{ secrets.TILE_PASSWORD }}
