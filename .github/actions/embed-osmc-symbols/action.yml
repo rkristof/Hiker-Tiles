@@ -28,12 +28,12 @@ runs:
           --repo rkristof/waymarkedtrails-shields \
           --json assets \
           --jq '.assets[] | select(.name | endswith(".whl")) | .url' | head -1)
-        pip3 install "$wheel_url"
+        /usr/bin/python3 -m pip install --user "$wheel_url"
       env:
         GH_TOKEN: ${{ github.token }}
 
     - name: Generate and embed OSMC and KCT symbol images
-      shell: python3 {0}
+      shell: /usr/bin/python3 {0}
       env:
         FILENAME: ${{ inputs.filename }}
         EMBED_KCT: ${{ inputs.embed_kct_symbols }}
