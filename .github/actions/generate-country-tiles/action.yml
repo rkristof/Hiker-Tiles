@@ -42,7 +42,13 @@ runs:
         path: ~/.cache/pip
         key: pip-${{ runner.os }}-packages-v1
 
-    - name: Download OSM extracts
+    - name: Cache GDAL environment
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/hiker-gdal
+        key: gdal-${{ runner.os }}-3.11-v2
+
+    - name: Download OSM extract
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
@@ -74,7 +80,29 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends osmium-tool libsqlite3-0 zlib1g libbz2-1.0 libexpat1 liblz4-1
-        pip3 install networkx numpy osmium rasterio
+        GDAL_PREFIX="$HOME/.cache/hiker-gdal/3.11"
+        if [ ! -x "$GDAL_PREFIX/bin/gdalinfo" ]; then
+          rm -rf "$GDAL_PREFIX"
+          curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest \
+            | tar -xj -C /tmp bin/micromamba
+          /tmp/bin/micromamba create \
+            --yes \
+            --prefix "$GDAL_PREFIX" \
+            --channel conda-forge \
+            "gdal>=3.11,<4" \
+            pip
+        fi
+        echo "$GDAL_PREFIX/bin" >> "$GITHUB_PATH"
+        echo "GDAL_DATA=$GDAL_PREFIX/share/gdal" >> "$GITHUB_ENV"
+        echo "PROJ_LIB=$GDAL_PREFIX/share/proj" >> "$GITHUB_ENV"
+        export PATH="$GDAL_PREFIX/bin:$PATH"
+        gdalinfo --version
+        GDAL_VERSION=$(gdalinfo --version | sed -E 's/.* ([0-9]+\.[0-9]+).*/\1/')
+        if ! dpkg --compare-versions "$GDAL_VERSION" ge 3.11; then
+          echo "GDAL 3.11+ required, found $GDAL_VERSION" >&2
+          exit 1
+        fi
+        python3 -m pip install networkx numpy osmium rasterio shapely
 
     - name: Combine OSM extracts
       shell: bash
@@ -140,12 +168,25 @@ runs:
           -o highways-filtered.osm.pbf
         echo "Filtered: $(du -sh tiles-filtered.osm.pbf | cut -f1)"
         python3 .hiker-routes/extract_hiking_routes.py
-        rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf elevation-tiles
+        rm -rf tiles-filtered.osm.pbf highways-filtered.osm.pbf tiles-latest.osm.pbf
         echo "Natural points: $(wc -l < natural-points.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes.geojsonseq)"
         echo "Symbol lines: $(wc -l < hiking-symbols.geojsonseq)"
         echo "Route lines: $(wc -l < hiking-routes-interaction.geojsonseq)"
         echo "Unique OSMC symbols: $(wc -l < osmc-symbols.txt)"
+
+    - name: Generate terrain hillshade and contours
+      shell: bash
+      env:
+        COUNTRY: ${{ inputs.country }}
+      run: |
+        time python3 .hiker-routes/generate_terrain.py \
+          --elevation-directory elevation-tiles \
+          --extent extent.poly \
+          --hillshade-output "${COUNTRY}-terrain.mbtiles" \
+          --contours-output contours.geojson
+        echo "Terrain: $(du -sh "${COUNTRY}-terrain.mbtiles" | cut -f1)"
+        echo "Contours: $(wc -l < contours.geojson) bytes: $(du -h contours.geojson | cut -f1)"
 
     - name: Download Tippecanoe binary
       shell: bash
@@ -188,6 +229,23 @@ runs:
           hiking-routes.geojsonseq \
           hiking-symbols.geojsonseq \
           hiking-routes-interaction.geojsonseq
+        tippecanoe \
+          --output contours.mbtiles \
+          --minimum-zoom 5 \
+          --maximum-zoom 13 \
+          --low-detail 9 \
+          --simplification 0.5 \
+          --reorder \
+          --hilbert \
+          --coalesce \
+          --single-precision \
+          --no-tile-size-limit \
+          --force \
+          --named-layer=contours:contours.geojson
+        mv contours.mbtiles "${COUNTRY}-contours.mbtiles"
+        echo "Contours tiles: $(du -sh "${COUNTRY}-contours.mbtiles" | cut -f1)"
+        rm contours.geojson extent.poly
+        rm -rf elevation-tiles
         cp base.mbtiles "${COUNTRY}-base.mbtiles"
         echo "Base: $(du -sh "${COUNTRY}-base.mbtiles" | cut -f1)"
 
@@ -213,7 +271,13 @@ runs:
       shell: bash
       env:
         COUNTRY: ${{ inputs.country }}
-      run: tar -czf "${COUNTRY}-tiles.tar.gz" "${COUNTRY}-base.mbtiles" "${COUNTRY}-hiking.mbtiles"
+      run: |
+        tar -czf "${COUNTRY}-tiles.tar.gz" \
+          "${COUNTRY}-base.mbtiles" \
+          "${COUNTRY}-hiking.mbtiles"
+        tar -czf "${COUNTRY}-terrain-tiles.tar.gz" \
+          "${COUNTRY}-terrain.mbtiles" \
+          "${COUNTRY}-contours.mbtiles"
 
     - name: Encrypt tiles archive
       shell: bash
@@ -230,6 +294,15 @@ runs:
           -in "${COUNTRY}-tiles.tar.gz" \
           -out "${COUNTRY}-tiles.tar.gz.enc"
         rm "${COUNTRY}-tiles.tar.gz"
+        openssl enc -aes-256-cbc \
+          -pbkdf2 \
+          -iter 600000 \
+          -md sha256 \
+          -salt \
+          -pass env:TILE_PASSWORD \
+          -in "${COUNTRY}-terrain-tiles.tar.gz" \
+          -out "${COUNTRY}-terrain-tiles.tar.gz.enc"
+        rm "${COUNTRY}-terrain-tiles.tar.gz"
 
     - name: Publish to GitHub Releases
       shell: bash
@@ -239,6 +312,7 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         NOTES="Auto-generated map tiles from OpenStreetMap data (ODbL).
+        Terrain data from Copernicus GLO-30.
         Source: Geofabrik extracts
         Updated: $(date -u '+%Y-%m-%d %H:%M UTC')"
 
@@ -246,13 +320,17 @@ runs:
         RELEASE_TITLE="Tiles (${VERSION})"
 
         if gh release view "$RELEASE_TAG" &>/dev/null; then
-          gh release upload "$RELEASE_TAG" "${COUNTRY}-tiles.tar.gz.enc" --clobber
+          gh release upload "$RELEASE_TAG" \
+            "${COUNTRY}-tiles.tar.gz.enc" \
+            "${COUNTRY}-terrain-tiles.tar.gz.enc" \
+            --clobber
           gh release edit "$RELEASE_TAG" --notes "$NOTES"
         else
           gh release create "$RELEASE_TAG" \
             --title "$RELEASE_TITLE" \
             --notes "$NOTES" \
-            "${COUNTRY}-tiles.tar.gz.enc"
+            "${COUNTRY}-tiles.tar.gz.enc" \
+            "${COUNTRY}-terrain-tiles.tar.gz.enc"
         fi
         gh api \
           --method POST \
