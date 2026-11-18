@@ -332,8 +332,14 @@ function process_streets()
 	local min_zoom_layer = 5
 	local mz = inf_zoom
 	local kind = ""
-	local highway = Find("highway")
 	local service = Find("service")
+	local footway = Find("footway")
+	-- Minor service ways and mapped sidewalks clutter a hiking map without adding navigable paths.
+	if service == "driveway" or service == "parking_aisle" or service == "drive-through"
+		or footway == "sidewalk" or footway == "crossing" then
+		return
+	end
+	local highway = Find("highway")
 	if highway ~= "" then
 		if highway == "motorway" or highway == "motorway_link" then
 			mz = min_zoom_layer
@@ -352,16 +358,13 @@ function process_streets()
 			kind = "tertiary"
 		elseif highway == "unclassified" or highway == "residential" or highway == "bus_guideway" or highway == "busway" then
 			mz = 11
-			kind = highway
-		elseif highway == "living_street" or highway == "pedestrian" or highway == "track" then
+			kind = "default"
+		elseif highway == "living_street" or highway == "pedestrian" or highway == "service" or highway == "footway" or highway == "steps" or highway == "cycleway" then
 			mz = 13
-			kind = highway
-		elseif highway == "service" then
+			kind = "default"
+		elseif highway == "path" or highway == "track" then
 			mz = 13
-			kind = highway
-		elseif highway == "footway" or highway == "steps" or highway == "path" or highway == "cycleway" then
-			mz = 13
-			kind = highway
+			kind = "path"
 		end
 	end
 	if mz <= 8 then
