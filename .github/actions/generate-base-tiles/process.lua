@@ -340,6 +340,14 @@ function process_streets()
 		return
 	end
 	local highway = Find("highway")
+	local access = Find("access")
+	local foot = Find("foot")
+	-- Private or closed ways without explicit pedestrian access cannot be walked; tracks and
+	-- paths stay because their access tags usually restrict only motor vehicles.
+	if (access == "private" or access == "no") and foot ~= "yes" and foot ~= "designated" and foot ~= "permissive"
+		and highway ~= "track" and highway ~= "path" then
+		return
+	end
 	if highway ~= "" then
 		if highway == "motorway" or highway == "motorway_link" then
 			mz = min_zoom_layer
